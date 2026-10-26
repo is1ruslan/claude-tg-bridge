@@ -44,10 +44,10 @@ function markInjected(store, dialog) {
 
 // After an answer to question `cursor`: show the next question or inject the whole sequence.
 function advance(store, dialog, chosenLabel) {
-  const out = resolvedEdit(dialog, chosenLabel);
   const questions = dialog.payload?.questions ?? [];
-  if (store.pendingOther === dialog.id) store.pendingOther = null;
   if (dialog.cursor + 1 < questions.length) {
+    const out = resolvedEdit(dialog, chosenLabel);
+    if (store.pendingOther === dialog.id) store.pendingOther = null;
     dialog.cursor++;
     dialog.multi = [];
     const q = questions[dialog.cursor];
@@ -62,9 +62,11 @@ function advance(store, dialog, chosenLabel) {
   try {
     steps = askSequence(questions, dialog.answers);
   } catch {
+    // Roll back the answer just recorded; the dialog stays open on the same question.
+    dialog.answers.splice(dialog.cursor);
     return [{ type: 'send', text: '⚠ Не удалось собрать ответ — ответьте в терминале', bind: { sessionId: dialog.sessionId } }];
   }
-  out.unshift({ type: 'inject', sessionId: dialog.sessionId, steps, verify: verifyOf(dialog) });
+  const out = [{ type: 'inject', sessionId: dialog.sessionId, steps, verify: verifyOf(dialog) }, ...resolvedEdit(dialog, chosenLabel)];
   markInjected(store, dialog);
   return out;
 }
@@ -91,7 +93,7 @@ function handleCallback(store, cq) {
 
   if (kind === 'r') {
     const route = store.pendingRoute;
-    if (!route) return [ack('Устарело')];
+    if (!route || String(route.messageId) !== parts[2]) return [ack('Устарело')];
     const s = store.sessionByShort(parts[1]);
     if (!s) return [ack('Сессия завершена')];
     store.pendingRoute = null;
@@ -115,7 +117,7 @@ function handleCallback(store, cq) {
       store.pendingOther = d.id;
       return [ack(), {
         type: 'send', text: '✏️ Напишите, что изменить в плане', forceReply: true,
-        bind: { sessionId: d.sessionId, dialogId: d.id },
+        bind: { sessionId: d.sessionId, dialogId: d.id, prompt: true },
       }];
     }
     const inj = d.kind === 'plan'
@@ -140,7 +142,7 @@ function handleCallback(store, cq) {
     store.pendingOther = d.id;
     return [ack(), {
       type: 'send', text: '✏️ Напишите свой вариант ответа', forceReply: true,
-      bind: { sessionId: d.sessionId, dialogId: d.id },
+      bind: { sessionId: d.sessionId, dialogId: d.id, prompt: true },
     }];
   }
 
@@ -248,7 +250,7 @@ function handleMessage(store, msg, now) {
   if (live.length === 1) return deliver(store, live[0], text, { replyTo: msg.message_id });
   if (!live.length) return [{ type: 'send', text: 'Нет активных сессий' }];
   store.pendingRoute = { text, createdAt: now, messageId: msg.message_id };
-  return [{ type: 'send', text: 'В какую сессию отправить?', keyboard: sessionPickKeyboard(pickItems(store), 'r') }];
+  return [{ type: 'send', text: 'В какую сессию отправить?', keyboard: sessionPickKeyboard(pickItems(store), 'r', String(msg.message_id)) }];
 }
 
 // ---------- entry ----------

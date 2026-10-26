@@ -26,8 +26,10 @@ function harness() {
       const id = nextMsg++;
       e.messageId = id;
       if (e.bind) {
-        store.bindMessage(id, e.bind);
-        if (e.bind.dialogId) store.getDialog(e.bind.dialogId).messageIds.push(id);
+        // Executor contract: bind.prompt → binding only, never pushed into dialog.messageIds.
+        const { prompt, ...binding } = e.bind;
+        store.bindMessage(id, binding);
+        if (binding.dialogId && !prompt) store.getDialog(binding.dialogId).messageIds.push(id);
       }
     }
     return effects;
@@ -204,13 +206,14 @@ test('multi: toggle edits keyboard, empty submit refused, submit injects', () =>
 
 test('"Другое" via force-reply → text injected as other answer', () => {
   const h = started();
-  h.hook('PreToolUse-Ask-single');
+  const [question] = h.hook('PreToolUse-Ask-single');
   const d = lastDialog(h.store);
   const eff = h.upd(h.cb(`o|${d.id}|0`));
   const [prompt] = sends(eff);
   assert.equal(prompt.text, '✏️ Напишите свой вариант ответа');
   assert.equal(prompt.forceReply, true);
-  assert.deepEqual(prompt.bind, { sessionId: SID, dialogId: d.id });
+  assert.deepEqual(prompt.bind, { sessionId: SID, dialogId: d.id, prompt: true });
+  assert.deepEqual(d.messageIds, [question.messageId]);
   assert.equal(h.store.pendingOther, d.id);
 
   const e2 = h.upd(h.text('Фиолетовый', { replyTo: prompt.messageId }));
@@ -222,8 +225,37 @@ test('"Другое" via force-reply → text injected as other answer', () => {
   assert.deepEqual(injects(e2)[0].verify, { dialogId: d.id, timeoutMs: 10000 });
   assert.equal(h.store.pendingOther, null);
   assert.equal(d.status, 'injected');
-  // the edited message is the last bound one (force-reply prompt)
-  assert.match(ofType(e2, 'edit')[0].text, /✔ выбрано: Фиолетовый/);
+  // the ✔ edit targets the original question message, not the force-reply prompt
+  const [edit] = ofType(e2, 'edit');
+  assert.equal(edit.messageId, question.messageId);
+  assert.match(edit.text, /✔ выбрано: Фиолетовый/);
+});
+
+test('multi: t| after o| still edits the question message', () => {
+  const h = started();
+  const [question] = h.hook('PreToolUse-Ask-multi');
+  const d = lastDialog(h.store);
+  const [prompt] = sends(h.upd(h.cb(`o|${d.id}|0`)));
+  assert.notEqual(prompt.messageId, question.messageId);
+  const eff = h.upd(h.cb(`t|${d.id}|0|2`));
+  const [edit] = ofType(eff, 'edit');
+  assert.equal(edit.messageId, question.messageId);
+  assert.equal(edit.keyboard[0][1].text, '☑ 2');
+});
+
+test('askSequence failure rolls back the answer, dialog stays open', () => {
+  const h = started();
+  h.hook('PreToolUse-Ask-two');
+  const d = lastDialog(h.store);
+  h.upd(h.cb(`a|${d.id}|0|1`));
+  d.answers[0] = { kind: 'bogus' }; // corrupt earlier answer → askSequence throws
+  const eff = h.upd(h.cb(`a|${d.id}|1|2`));
+  assert.equal(injects(eff).length, 0);
+  assert.match(sends(eff)[0].text, /Не удалось собрать ответ/);
+  assert.equal(d.answers.length, 1);
+  assert.equal(d.cursor, 1);
+  assert.equal(d.status, 'open');
+  assert.equal(ofType(eff, 'edit').length, 0);
 });
 
 test('plain text (no reply) while ask open → other answer for current question', () => {
@@ -270,16 +302,18 @@ test('plan option 1 → inject planSequence with verify; feedback via force-repl
 
 test('plan "Изменить план" → force-reply, then text → planSequence(feedback, text) no verify', () => {
   const h = started();
-  h.hook('PreToolUse-ExitPlanMode');
+  const [plan] = h.hook('PreToolUse-ExitPlanMode');
   const d = lastDialog(h.store);
   const eff = h.upd(h.cb(`p|${d.id}|${PLAN_FEEDBACK_INDEX + 1}`));
   assert.equal(injects(eff).length, 0);
   const [prompt] = sends(eff);
   assert.equal(prompt.text, '✏️ Напишите, что изменить в плане');
   assert.equal(prompt.forceReply, true);
+  assert.equal(prompt.bind.prompt, true);
   assert.equal(h.store.pendingOther, d.id);
   const e2 = h.upd(h.text('добавь тесты', { replyTo: prompt.messageId }));
   assert.deepEqual(injects(e2), [{ type: 'inject', sessionId: SID, steps: [{ text: '3' }, { text: 'добавь тесты' }, { sleep: 400 }, { key: 'ENTER' }] }]);
+  assert.equal(ofType(e2, 'edit')[0].messageId, plan.messageId);
   assert.match(ofType(e2, 'edit')[0].text, /✔ выбрано: правки: добавь тесты/);
   assert.equal(d.status, 'injected');
   assert.equal(h.store.pendingOther, null);
@@ -345,14 +379,15 @@ test('no sessions → "Нет активных сессий"', () => {
 
 test('two sessions + text without reply → pendingRoute + picker; r| injects into chosen', () => {
   const h = twoSessions();
-  const eff = h.upd(h.text('запусти тесты'), { now: T0 + 50 });
+  const u = h.text('запусти тесты');
+  const eff = h.upd(u, { now: T0 + 50 });
   assert.equal(injects(eff).length, 0);
   const [pick] = sends(eff);
   assert.equal(pick.text, 'В какую сессию отправить?');
   assert.equal(pick.keyboard.length, 2);
   assert.deepEqual(h.store.pendingRoute?.text, 'запусти тесты');
   assert.equal(h.store.pendingRoute.createdAt, T0 + 50);
-  const btnB = pick.keyboard.flat().find(b => b.callback_data.startsWith(`r|${SID_B.slice(0, 8)}`));
+  const btnB = pick.keyboard.flat().find(b => b.callback_data === `r|${SID_B.slice(0, 8)}|${u.message.message_id}`);
   assert.ok(btnB);
 
   const e2 = h.upd(h.cb(btnB.callback_data, { messageId: pick.messageId }));
@@ -365,6 +400,21 @@ test('two sessions + text without reply → pendingRoute + picker; r| injects in
   const e3 = h.upd(h.cb(btnB.callback_data));
   assert.deepEqual(e3.map(e => e.type), ['answerCallback']);
   assert.equal(e3[0].text, 'Устарело');
+});
+
+test('r| from an older picker (msgKey mismatch) → "Устарело"; current picker routes text2', () => {
+  const h = twoSessions();
+  const [pick1] = sends(h.upd(h.text('текст 1')));
+  const [pick2] = sends(h.upd(h.text('текст 2')));
+  const old = pick1.keyboard.flat().find(b => b.callback_data.startsWith(`r|${SID_B.slice(0, 8)}|`));
+  const stale = h.upd(h.cb(old.callback_data, { messageId: pick1.messageId }));
+  assert.deepEqual(stale.map(e => e.type), ['answerCallback']);
+  assert.equal(stale[0].text, 'Устарело');
+  assert.equal(h.store.pendingRoute.text, 'текст 2');
+  const cur = pick2.keyboard.flat().find(b => b.callback_data.startsWith(`r|${SID_B.slice(0, 8)}|`));
+  const eff = h.upd(h.cb(cur.callback_data, { messageId: pick2.messageId }));
+  assert.deepEqual(injects(eff), [{ type: 'inject', sessionId: SID_B, steps: [{ text: 'текст 2' }, { sleep: 400 }, { key: 'ENTER' }] }]);
+  assert.equal(h.store.pendingRoute, null);
 });
 
 test('reply to a message of session B → inject into B', () => {

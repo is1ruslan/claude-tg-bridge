@@ -208,3 +208,87 @@ test('install: malformed hooks aborts before any side effect', async () => {
     assert.ok(!fs.existsSync(path.join(home, '.claude', 'telegram')));
   }
 });
+
+// ---------- F8: Task XML + install order ----------
+
+function xmlSetup(opts) {
+  const s = setup(opts);
+  s.d.env = { USERDOMAIN: 'DOM', USERNAME: 'bob' };
+  s.seen = [];
+  s.d.exec = async (cmd, args) => {
+    s.calls.push([cmd, ...args]);
+    if (cmd === 'schtasks' && args[0] === '/Create') {
+      const file = args[args.indexOf('/XML') + 1];
+      const settings = path.join(s.home, '.claude', 'settings.json');
+      s.seen.push({
+        xmlBytes: fs.readFileSync(file),
+        launcherExists: fs.existsSync(path.join(s.home, '.claude', 'telegram', 'launch.vbs')),
+        envExists: fs.existsSync(path.join(s.home, '.claude', 'telegram', '.env')),
+        settingsAtCreate: fs.existsSync(settings) ? fs.readFileSync(settings, 'utf8') : null,
+      });
+      return s.createResult ?? { code: 0, stdout: '', stderr: '' };
+    }
+    return { code: 0, stdout: '', stderr: '' };
+  };
+  return s;
+}
+
+test('F8: task registered via schtasks /Create /TN cc-telegram /XML <file> /F with UTF-16 LE BOM XML', async () => {
+  const s = xmlSetup({ settings: JSON.stringify({ effortLevel: 'high' }) });
+  assert.equal(await run(['install'], s.d), 0);
+  const create = s.calls.find((c) => c[0] === 'schtasks' && c[1] === '/Create');
+  assert.deepEqual([create[1], create[2], create[3], create[4], create[6]], ['/Create', '/TN', 'cc-telegram', '/XML', '/F']);
+  assert.equal(create.length, 7);
+  const bytes = s.seen[0].xmlBytes;
+  assert.deepEqual([...bytes.subarray(0, 2)], [0xff, 0xfe], 'UTF-16 LE BOM');
+  const xml = bytes.subarray(2).toString('utf16le');
+  assert.match(xml, /^<\?xml version="1\.0" encoding="UTF-16"\?>/);
+  const has = (re) => assert.match(xml, re);
+  has(/<LogonTrigger>[\s\S]*<UserId>DOM\\bob<\/UserId>[\s\S]*<\/LogonTrigger>/);
+  has(/<LogonType>InteractiveToken<\/LogonType>/);
+  has(/<RunLevel>LeastPrivilege<\/RunLevel>/);
+  has(/<DisallowStartIfOnBatteries>false<\/DisallowStartIfOnBatteries>/);
+  has(/<StopIfGoingOnBatteries>false<\/StopIfGoingOnBatteries>/);
+  has(/<ExecutionTimeLimit>PT0S<\/ExecutionTimeLimit>/);
+  has(/<MultipleInstancesPolicy>IgnoreNew<\/MultipleInstancesPolicy>/);
+  has(/<RestartOnFailure>\s*<Interval>PT1M<\/Interval>\s*<Count>999<\/Count>\s*<\/RestartOnFailure>/);
+  has(/<Hidden>true<\/Hidden>/);
+  const launcher = path.join(s.home, '.claude', 'telegram', 'launch.vbs');
+  has(/<Command>wscript\.exe<\/Command>/);
+  assert.ok(xml.includes(`<Arguments>"${launcher}"</Arguments>`), 'launch.vbs quoted');
+  assert.ok(!s.calls.some((c) => c.includes('/SC') || c.includes('/TR')));
+});
+
+test('F8: order — exe, .env, launch.vbs, task, and only then settings.json', async () => {
+  const s = xmlSetup({ settings: JSON.stringify({ effortLevel: 'high' }) });
+  const order = [];
+  s.d.buildNative = async () => { order.push('build'); return 'built'; };
+  assert.equal(await run(['install'], s.d), 0);
+  assert.deepEqual(order, ['build']);
+  const seen = s.seen[0];
+  assert.equal(seen.launcherExists, true);
+  assert.equal(seen.envExists, true);
+  assert.equal(seen.settingsAtCreate, JSON.stringify({ effortLevel: 'high' }), 'settings untouched until the task exists');
+  const after = JSON.parse(fs.readFileSync(path.join(s.home, '.claude', 'settings.json'), 'utf8'));
+  assert.ok(after.hooks.PreToolUse);
+});
+
+test('F8: task step fails -> settings.json untouched, error + retry hint (admin), exit 1', async () => {
+  const s = xmlSetup({ settings: JSON.stringify({ effortLevel: 'high' }) });
+  s.createResult = { code: 1, stdout: '', stderr: 'ERROR: Access is denied.' };
+  assert.equal(await run(['install'], s.d), 1);
+  assert.equal(fs.readFileSync(path.join(s.home, '.claude', 'settings.json'), 'utf8'), JSON.stringify({ effortLevel: 'high' }));
+  assert.ok(!fs.readdirSync(path.join(s.home, '.claude')).some((f) => f.startsWith('settings.json.bak')));
+  const text = s.lines.join('\n');
+  assert.match(text, /Access is denied/);
+  assert.match(text, /запустите терминал от администратора, если отказано в доступе/);
+  assert.match(text, /node src\/cli\.mjs install/);
+  assert.ok(!s.calls.some((c) => c[1] === '/Run'));
+});
+
+test('F8: XML escapes special characters in paths and user name', async () => {
+  const { taskXml } = await import('../src/cli.mjs');
+  const xml = taskXml({ userId: 'D&D\\bo<b>', launcher: 'C:\\a&b\\launch.vbs' });
+  assert.ok(xml.includes('<UserId>D&amp;D\\bo&lt;b&gt;</UserId>'));
+  assert.ok(xml.includes('<Arguments>"C:\\a&amp;b\\launch.vbs"</Arguments>'));
+});

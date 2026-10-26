@@ -22,7 +22,7 @@ export const USAGE = `cc-telegram — мост между Claude Code и Telegra
 
 Использование: node src/cli.mjs <команда>
 
-  install     установить: сборка inject.exe, папки, .env, хуки в settings.json, задача Планировщика
+  install     установить: сборка inject.exe, папки, .env, задача Планировщика, хуки в settings.json
   uninstall   остановить демон, удалить задачу и хуки (.env, логи, состояние остаются)
   status      состояние демона, сессии, задача, флаг отключения
   start       запустить демон (задача Планировщика)
@@ -39,6 +39,7 @@ export function defaultDeps() {
   return {
     fs: nodeFs,
     home: os.homedir(),
+    env: process.env,
     repo: path.resolve(here, '..'),
     execPath: process.execPath,
     nodeVersion: process.versions.node,
@@ -68,6 +69,62 @@ export function renderLauncher(template, repo, execPath) {
   return template
     .split('"node ""__REPO__').join(`"""${execPath}"" ""${repo}`)
     .split('__REPO__').join(repo);
+}
+
+const xmlEsc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); // text nodes only
+
+// Task Scheduler definition (written as UTF-16 LE with BOM, registered via schtasks /XML).
+export function taskXml({ userId, launcher }) {
+  const u = xmlEsc(userId);
+  return `<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>cc-telegram: мост Claude Code ↔ Telegram (демон)</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <UserId>${u}</UserId>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>${u}</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>false</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>true</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>999</Count>
+    </RestartOnFailure>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>wscript.exe</Command>
+      <Arguments>"${xmlEsc(launcher)}"</Arguments>
+    </Exec>
+  </Actions>
+</Task>
+`;
 }
 
 function readJsonSafe(fs, file) {
@@ -188,15 +245,25 @@ async function install(d) {
   if (!d.fs.existsSync(p.env)) { d.fs.writeFileSync(p.env, ENV_TEMPLATE); envCreated = true; }
   await d.restrictToUser(p.env);
 
-  writeSettings(d, st.file, mergeHooks(st.obj, d.repo), st.existed);
-
   const tpl = d.fs.readFileSync(path.join(d.repo, 'scripts', 'launch.vbs'), 'utf8');
   const launcher = path.join(p.root, 'launch.vbs');
   d.fs.writeFileSync(launcher, renderLauncher(tpl, d.repo, d.execPath));
 
-  const tr = `wscript.exe "${launcher}"`;
-  const c = await d.exec('schtasks', ['/Create', '/TN', TASK, '/SC', 'ONLOGON', '/RL', 'LIMITED', '/TR', tr, '/F']);
-  if (c.code !== 0) { d.err(`schtasks /Create не удался: ${c.stderr || c.stdout}`.trim()); return 1; }
+  // F8: the task goes in before settings.json — hooks without a daemon task would be useless.
+  const env = d.env ?? process.env;
+  const userId = env.USERDOMAIN ? `${env.USERDOMAIN}\\${env.USERNAME ?? ''}` : String(env.USERNAME ?? '');
+  const xmlFile = path.join(p.root, 'task.xml');
+  d.fs.writeFileSync(xmlFile, Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(taskXml({ userId, launcher }), 'utf16le')]));
+  const c = await d.exec('schtasks', ['/Create', '/TN', TASK, '/XML', xmlFile, '/F']);
+  d.fs.rmSync(xmlFile, { force: true });
+  if (c.code !== 0) {
+    d.err(`schtasks /Create не удался: ${c.stderr || c.stdout}`.trim());
+    d.err('settings.json не изменён. Исправьте причину и повторите: node src/cli.mjs install');
+    d.err('(запустите терминал от администратора, если отказано в доступе)');
+    return 1;
+  }
+
+  writeSettings(d, st.file, mergeHooks(st.obj, d.repo), st.existed);
 
   d.out('Установлено:');
   d.out(`  - собран native/inject.exe`);

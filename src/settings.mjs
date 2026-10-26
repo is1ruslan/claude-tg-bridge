@@ -2,7 +2,7 @@
 export const HOOK_EVENTS = [
   ['SessionStart', null],
   ['UserPromptSubmit', null],
-  ['PreToolUse', 'AskUserQuestion|ExitPlanMode'],
+  ['PreToolUse', null], // F5: all tools — events.mjs closes stale plan/perm dialogs on any PreToolUse
   ['PermissionRequest', null],
   ['PostToolUse', null],
   ['Stop', null],

@@ -33,10 +33,15 @@ test('mergeHooks is idempotent', () => {
   assert.equal(mergeHooks(once, REPO).hooks.Stop.length, 2);
 });
 
-test('PreToolUse group has matcher; all our hooks async', () => {
+test('F5: no matcher anywhere (PreToolUse for all tools, as events.mjs expects); all our hooks async', () => {
   const m = mergeHooks(user(), REPO);
-  assert.equal(m.hooks.PreToolUse[0].matcher, 'AskUserQuestion|ExitPlanMode');
+  assert.equal(m.hooks.PreToolUse.length, 1);
+  assert.ok(!('matcher' in m.hooks.PreToolUse[0]));
+  for (const [, matcher] of HOOK_EVENTS) assert.equal(matcher, null);
   assert.equal(m.hooks.Stop[1].matcher, undefined);
+  // re-install over an old matcher-based entry replaces it
+  const old = { hooks: { PreToolUse: [{ matcher: 'AskUserQuestion|ExitPlanMode', hooks: [{ type: 'command', command: hookCommand(REPO, 'PreToolUse'), async: true }] }] } };
+  assert.deepEqual(mergeHooks(old, REPO).hooks.PreToolUse, mergeHooks({}, REPO).hooks.PreToolUse);
   let n = 0;
   for (const groups of Object.values(m.hooks)) for (const g of groups) for (const h of g.hooks) {
     if (h.command.includes('cc-telegram/src/hook.mjs')) { n++; assert.equal(h.async, true); assert.equal(h.timeout, 5); assert.equal(h.type, 'command'); }

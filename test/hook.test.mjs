@@ -108,3 +108,18 @@ test('disabled flag file -> nothing sent', async () => {
     assert.equal(s.got.length, 0);
   } finally { s.srv.close(); }
 });
+
+test('RF-4: daemon accepts the connection but never answers -> exit 0 < 2000ms', async () => {
+  const { home, p } = tempHome();
+  const sockets = [];
+  const srv = http.createServer(() => { /* hang forever */ });
+  srv.on('connection', (c) => sockets.push(c));
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  try {
+    writeDaemonJson(p, srv.address().port);
+    const r = await runHook(home);
+    assert.equal(r.code, 0);
+    assert.equal(r.out, '');
+    assert.ok(r.ms < 2000, `took ${r.ms}ms`);
+  } finally { for (const c of sockets) c.destroy(); srv.close(); }
+});

@@ -20,6 +20,7 @@ import { restrictToUser as restrictDefault } from './acl.mjs';
 export const EXIT_PORT_IN_USE = 1;
 export const EXIT_FATAL = 2;
 export const EXIT_CONFIG = 3;
+export const EXIT_CRASH = 4; // unexpected failure in main(): supervisor restarts with backoff
 
 const MAX_BODY = 2 * 1024 * 1024;
 const BACKOFF_CAP_MS = 30_000;
@@ -121,14 +122,29 @@ export async function startDaemon({
   }
 
   // ---------- process helpers ----------
+  // listProcs() resolves an empty Map when PowerShell fails/times out: that means "unknown",
+  // never "everything is dead" — it is not cached and callers must not act on it.
   let procCache = null;
   const cachedList = async () => {
     if (procCache && Date.now() - procCache.at <= PROCS_CACHE_MS) return procCache.map;
     const map = await procs.listProcs();
+    if (!(map instanceof Map) || map.size === 0) return null;
     procCache = { at: Date.now(), map };
     return map;
   };
-  const isAlive = (pid) => (procs.listProcs ? procs.isClaudeAlive(pid, { listProcs: cachedList }) : procs.isClaudeAlive(pid));
+  // -> 'alive' | 'dead' | 'unknown'
+  async function aliveState(pid) {
+    if (!procs.listProcs) return (await procs.isClaudeAlive(pid)) ? 'alive' : 'dead';
+    const map = await cachedList();
+    if (!map) return 'unknown';
+    return (await procs.isClaudeAlive(pid, { listProcs: async () => map })) ? 'alive' : 'dead';
+  }
+
+  // A failed/dropped inject leaves the dialog answerable again from Telegram.
+  function reopenDialog(e) {
+    const d = e.verify?.dialogId ? store.getDialog(e.verify.dialogId) : null;
+    if (d && d.status === 'injected') { d.status = 'open'; d.source = null; }
+  }
 
   // ---------- effect executor ----------
   const chatId = config.userId;
@@ -151,14 +167,27 @@ export async function startDaemon({
   async function doInject(e) {
     const session = store.getSession(e.sessionId);
     const pid = session?.pid;
-    if (!session || pid == null || !(await isAlive(pid))) {
+    const state = !session || pid == null ? 'dead' : await aliveState(pid);
+    if (state === 'unknown') {
+      log.warn('inject dropped: process list unavailable', { session: session.short, pid });
+      reopenDialog(e);
+      await send({
+        text: `${header(labelOf(e.sessionId))}
+⚠ не удалось проверить процесс сессии, ответьте в терминале`,
+        bind: { sessionId: e.sessionId },
+      });
+      return;
+    }
+    if (state === 'dead') {
       log.warn('inject dropped: session process not alive', { session: String(e.sessionId).slice(0, 8), pid });
+      reopenDialog(e);
       await send({ text: 'Сессия завершена: ' + esc(labelOf(e.sessionId)), bind: session ? { sessionId: e.sessionId } : undefined });
       return;
     }
     const r = await inject.injectSteps(pid, e.steps);
     if (!r?.ok) {
       log.warn('inject failed', { session: session.short, error: r?.error });
+      reopenDialog(e);
       await send({
         text: `${header(labelOf(e.sessionId))}\n⚠ не удалось ввести в терминал: ${esc(r?.error ?? 'неизвестная ошибка')}`,
         bind: { sessionId: e.sessionId },
@@ -224,7 +253,10 @@ export async function startDaemon({
   // ---------- pruning dead sessions ----------
   async function pruneDead() {
     for (const s of [...store.sessions.values()]) {
-      if (s.pid == null || (await isAlive(s.pid))) continue;
+      if (s.pid == null) continue;
+      const state = await aliveState(s.pid);
+      if (state === 'unknown') { log.warn('process list unavailable, prune skipped'); return; }
+      if (state === 'alive') continue;
       log.info('session process gone, removing', { session: s.short, pid: s.pid });
       await runEffects(handleHookEvent(store, { event: 'SessionEnd', payload: { session_id: s.id, cwd: s.cwd } }, now()));
     }
@@ -385,13 +417,13 @@ export async function startDaemon({
 }
 
 // ---------- entry point ----------
-async function main() {
+// Handlers are installed before anything else runs, so an early failure is logged and
+// ends with EXIT_CRASH (restartable) instead of Node's default exit 1 (= "port in use").
+async function main(log, secrets) {
   const p = getPaths();
   const config = loadConfig();
   const secret = randomBytes(16).toString('hex');
-  const log = createLogger({ dir: p.logsDir, secrets: [config.token, secret] });
-  process.on('unhandledRejection', (e) => log.error('unhandledRejection', { error: String(e?.stack ?? e) }));
-  process.on('uncaughtException', (e) => log.error('uncaughtException', { error: String(e?.stack ?? e) }));
+  secrets.push(config.token, secret);
   const d = await startDaemon({ config, paths: p, log, secret });
   if (!d) return;
   const stop = () => { d.close().finally(() => process.exit(0)); };
@@ -400,4 +432,14 @@ async function main() {
 }
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]).toLowerCase() === fileURLToPath(import.meta.url).toLowerCase();
-if (isMain) main();
+if (isMain) {
+  const secrets = []; // filled in main(); maskSecrets reads it at write time
+  let log = { info() {}, warn() {}, error() {} };
+  try { log = createLogger({ dir: getPaths().logsDir, secrets }); } catch { /* keep no-op */ }
+  process.on('unhandledRejection', (e) => log.error('unhandledRejection', { error: String(e?.stack ?? e) }));
+  process.on('uncaughtException', (e) => log.error('uncaughtException', { error: String(e?.stack ?? e) }));
+  main(log, secrets).catch((e) => {
+    log.error('daemon crashed during startup', { error: String(e?.stack ?? e) });
+    process.exit(EXIT_CRASH);
+  });
+}

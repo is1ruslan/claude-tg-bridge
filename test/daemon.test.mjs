@@ -10,6 +10,7 @@ import { restrictToUser } from '../src/acl.mjs';
 import { paths as mkPaths } from '../src/config.mjs';
 import { TelegramError } from '../src/telegram.mjs';
 import { PLAN_FEEDBACK_INDEX } from '../src/keys.mjs';
+import { isClaudeAlive as realIsClaudeAlive } from '../src/procs.mjs';
 
 const FIX = new URL('./fixtures/hooks/', import.meta.url);
 const fx = (name, patch = {}) => ({ ...JSON.parse(fs.readFileSync(new URL(`${name}.json`, FIX), 'utf8')), ...patch });
@@ -168,8 +169,9 @@ test('RF-1: updates from a stranger -> no Telegram calls, no inject, logged with
     await s.d.idle();
     const dlg = dlgOf(s.telegram.sent[0]);
     const aliveBefore = s.procs.aliveCalls.length;
-    s.telegram.push(cb(`a|${dlg}|0|1`, 'cbX', STRANGER), msg('rm -rf secret-text', STRANGER), msg('/stop', STRANGER));
-    await waitFor(() => log.lines.filter((l) => l.msg === `ignored update from ${STRANGER}`).length === 3);
+    s.telegram.push(cb(`a|${dlg}|0|1`, 'cbX', STRANGER), msg('rm -rf secret-text', STRANGER), msg('/stop', STRANGER),
+      msg('reply-secret-text', STRANGER, { reply_to_message: { message_id: s.telegram.sent[0].id } }));
+    await waitFor(() => log.lines.filter((l) => l.msg === `ignored update from ${STRANGER}`).length === 4);
     await s.d.idle();
     assert.equal(s.telegram.sent.length, 1);
     assert.equal(s.telegram.answers.length, 0);
@@ -177,6 +179,7 @@ test('RF-1: updates from a stranger -> no Telegram calls, no inject, logged with
     assert.equal(s.inject.calls.length, 0);
     assert.equal(s.procs.aliveCalls.length, aliveBefore);
     assert.ok(!JSON.stringify(log.lines).includes('secret-text'));
+    assert.equal(s.d.store.getDialog(dlg).status, 'open');
   } finally { await s.d.close(); }
 });
 
@@ -193,6 +196,7 @@ test('RF-5: isClaudeAlive false at inject time -> no inject, "Сессия за�
     await waitFor(() => s.telegram.sent.some((m) => m.text.startsWith('Сессия завершена: ')));
     await s.d.idle();
     assert.equal(s.inject.calls.length, 0);
+    assert.equal(s.d.store.getDialog(dlgOf(s.telegram.sent[0])).status, 'open');
   } finally { await s.d.close(); }
 });
 
@@ -206,6 +210,63 @@ test('dead pid is pruned before a Telegram update: session removed, nothing inje
     assert.equal(s.inject.calls.length, 0);
     const h = await fetch(`http://127.0.0.1:${s.d.port}/health`, { headers: { 'x-cc-secret': s.dj.secret } });
     assert.deepEqual(await h.json(), { ok: true, sessions: 0 });
+  } finally { await s.d.close(); }
+});
+
+test('inject {ok:false} on a dialog answer -> warning, dialog reopened for retry', async () => {
+  const s = await setup({ inject: fakeInject({ ok: false, error: 'boom' }) });
+  try {
+    await s.hook('SessionStart');
+    await s.hook('PreToolUse-Ask-single');
+    await waitFor(() => s.telegram.sent.length === 1);
+    const dlg = dlgOf(s.telegram.sent[0]);
+    s.telegram.push(cb(`a|${dlg}|0|1`));
+    await waitFor(() => s.telegram.sent.some((m) => m.text.includes('⚠ не удалось ввести в терминал: boom')));
+    await s.d.idle();
+    const d = s.d.store.getDialog(dlg);
+    assert.equal(d.status, 'open');
+    assert.equal(d.source, null);
+    // retry from Telegram is accepted again (not «Ответ уже отправлен»)
+    s.telegram.push(cb(`a|${dlg}|0|1`, 'cbRetry'));
+    await waitFor(() => s.inject.calls.length === 2);
+  } finally { await s.d.close(); }
+});
+
+function unknownProcs() {
+  const p = fakeProcs();
+  p.listCalls = 0;
+  p.listProcs = async () => { p.listCalls++; return new Map(); }; // PowerShell failed/timed out
+  p.isClaudeAlive = realIsClaudeAlive;
+  return p;
+}
+
+test('process list unavailable (empty Map) -> prune skipped, sessions survive', async () => {
+  const procs = unknownProcs();
+  const s = await setup({ procs, extra: { pruneIntervalMs: 20 } });
+  try {
+    await s.hook('SessionStart');
+    await waitFor(() => procs.listCalls >= 3); // several prune passes, empty map never cached
+    await s.d.idle();
+    assert.equal(s.d.store.sessions.size, 1);
+    assert.equal(s.telegram.sent.length + s.telegram.edits.length, 0);
+  } finally { await s.d.close(); }
+});
+
+test('process list unavailable at inject time -> no inject, "cannot verify" warning, dialog reopened', async () => {
+  const procs = unknownProcs();
+  const s = await setup({ procs });
+  try {
+    await s.hook('SessionStart');
+    await s.hook('PreToolUse-Ask-single');
+    await waitFor(() => s.telegram.sent.length === 1);
+    const dlg = dlgOf(s.telegram.sent[0]);
+    s.telegram.push(cb(`a|${dlg}|0|1`));
+    await waitFor(() => s.telegram.sent.some((m) => m.text.includes('⚠ не удалось проверить процесс сессии, ответьте в терминале')));
+    await s.d.idle();
+    assert.equal(s.inject.calls.length, 0);
+    assert.ok(!s.telegram.sent.some((m) => m.text.startsWith('Сессия завершена')));
+    assert.equal(s.d.store.getDialog(dlg).status, 'open');
+    assert.equal(s.d.store.sessions.size, 1);
   } finally { await s.d.close(); }
 });
 
@@ -234,7 +295,7 @@ test('verify: dialog not closed within timeoutMs -> warning; closed -> no warnin
     s.telegram.push(cb(`a|${dlgOf(send2)}|0|1`, 'cb2'));
     await waitFor(() => s.inject.calls.length === 2);
     const r = await s.post({ event: 'PostToolUse', ppid: 999, payload: {
-      session_id: SID, cwd: 'C:\Projects\tg-spike', tool_name: 'AskUserQuestion', tool_use_id: 'toolu_second',
+      session_id: SID, cwd: 'C:\\Projects\\tg-spike', tool_name: 'AskUserQuestion', tool_use_id: 'toolu_second',
       tool_response: { answers: { 'Какой цвет?': 'Красный' } },
     } });
     assert.equal(r.status, 204);
@@ -440,6 +501,12 @@ test('supervisor: restarts on crash with backoff, stops on exit 3', async () => 
   assert.equal(calls[0].opts.stdio, 'ignore');
   assert.deepEqual(waits, [2000, 4000]);
   assert.equal(code, 0);
+});
+
+test('supervisor: crash exit 4 is restartable and resets the port-in-use streak', async () => {
+  const { calls, spawn } = fakeSpawner([1, 1, 4, 1, 1, 3]);
+  await runSupervisor({ spawn, sleep: async () => {}, log: silent, daemonPath: 'd.mjs' });
+  assert.equal(calls.length, 6);
 });
 
 test('supervisor: exit 1 three times in a row -> stop (another instance running)', async () => {

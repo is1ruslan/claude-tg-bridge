@@ -145,6 +145,45 @@ test('async reorder: PermissionRequest before its own PreToolUse does not close 
   const eff = handleHookEvent(h.store, { event: 'PreToolUse', payload: pre }, T0);
   assert.deepEqual(eff, []);
   assert.equal(dialogs(h.store)[0].status, 'open');
+  assert.equal(h.store.getSession(SID).state, 'waiting');
+});
+
+test('R2: PreToolUse of a non-dialog tool sets state working (other call closes perm)', () => {
+  const h = started();
+  h.run('PermissionRequest-Write'); // input differs from PreToolUse-Write fixture
+  assert.equal(h.store.getSession(SID).state, 'waiting');
+  const eff = h.run('PreToolUse-Write');
+  assert.equal(eff.filter(e => e.type === 'edit').length, 1);
+  assert.equal(h.store.getSession(SID).state, 'working');
+});
+
+test('R3: PostToolUse of a different tool does not close a perm dialog', () => {
+  const h = started();
+  const [send] = h.run('PermissionRequest-Write');
+  const eff = h.run('PostToolUse-Write', { patch: { tool_name: 'Bash', tool_input: { command: 'ls' } } });
+  assert.deepEqual(eff, []);
+  assert.equal(h.store.getDialog(send.bind.dialogId).status, 'open');
+});
+
+test('R3: PostToolUse finds the older perm of its tool even when a newer perm of another tool exists', () => {
+  const h = started();
+  const [w] = h.run('PermissionRequest-Write');
+  const [b] = h.run('PermissionRequest-Write', { patch: { tool_name: 'Bash', tool_input: { command: 'ls' }, permission_suggestions: [] } });
+  const eff = h.run('PostToolUse-Write');
+  assert.equal(h.store.getDialog(w.bind.dialogId).closedReason, 'terminal');
+  assert.equal(h.store.getDialog(b.bind.dialogId).status, 'open');
+  assert.equal(eff.length, 1);
+  assert.equal(eff[0].messageId, w.messageId);
+});
+
+test('R3: injected perm preferred over a newer open perm of the same tool', () => {
+  const h = started();
+  const [a] = h.run('PermissionRequest-Write');
+  const [b] = h.run('PermissionRequest-Write', { patch: { tool_input: { file_path: 'C:\\other.txt', content: '' } } });
+  h.store.getDialog(a.bind.dialogId).status = 'injected';
+  h.run('PostToolUse-Write');
+  assert.equal(h.store.getDialog(a.bind.dialogId).closedReason, 'terminal');
+  assert.equal(h.store.getDialog(b.bind.dialogId).status, 'open');
 });
 
 test('PreToolUse Ask single → 1 send with 3+Другое buttons and bind', () => {
@@ -230,6 +269,18 @@ test('Ask from Telegram with mismatching answer → ⚠ send', () => {
   assert.equal(eff[0].type, 'send');
   assert.deepEqual(eff[0].bind, { sessionId: SID });
   assert.equal(eff[0].text, '📁 <b>tg-spike · main</b>\n⚠ в сессию ушло «Зелёный», а не «Красный» — проверьте терминал');
+  assert.equal(d.closedReason, 'telegram');
+});
+
+test('Ask from Telegram: tool_response.answers missing the question key → mismatch check skipped', () => {
+  const h = started();
+  const [send] = h.run('PreToolUse-Ask-two');
+  const d = h.store.getDialog(send.bind.dialogId);
+  Object.assign(d, { source: 'telegram', answers: [{ kind: 'option', index: 0 }, { kind: 'option', index: 0 }] });
+  const post = fx('PostToolUse-Ask-two');
+  post.tool_response = { ...post.tool_response, answers: {} };
+  const eff = handleHookEvent(h.store, { event: 'PostToolUse', payload: post }, T0);
+  assert.deepEqual(eff, []);
   assert.equal(d.closedReason, 'telegram');
 });
 

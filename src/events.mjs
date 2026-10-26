@@ -84,6 +84,15 @@ function mismatchEffects(store, dialog, payload) {
   return out;
 }
 
+// Newest live perm dialog of the session for this tool name; 'injected' preferred over 'open'.
+function permDialogForTool(store, sessionId, toolName) {
+  const perms = liveDialogsOf(store, sessionId).filter(d => d.kind === 'perm' && d.toolName === toolName);
+  for (const st of ['injected', 'open']) {
+    for (let i = perms.length - 1; i >= 0; i--) if (perms[i].status === st) return perms[i];
+  }
+  return null;
+}
+
 function sameToolCall(dialog, payload) {
   return dialog.toolName === payload.tool_name
     && JSON.stringify(dialog.payload ?? null) === JSON.stringify(payload.tool_input ?? null);
@@ -139,8 +148,15 @@ export function handleHookEvent(store, ev, now) {
 
     case 'PreToolUse': {
       // Don't close the perm dialog of this very call (async hooks may deliver PermissionRequest first).
-      const out = closeStalePlanPerm(store, sid, d => d.kind === 'perm' && sameToolCall(d, payload));
-      if (tool === 'AskUserQuestion') {
+      let keptOwnPerm = false;
+      const out = closeStalePlanPerm(store, sid, d => {
+        const keep = d.kind === 'perm' && sameToolCall(d, payload);
+        if (keep) keptOwnPerm = true;
+        return keep;
+      });
+      if (!DIALOG_TOOLS.has(tool)) {
+        if (!keptOwnPerm) session.state = 'working';
+      } else if (tool === 'AskUserQuestion') {
         const input = payload.tool_input ?? {};
         const questions = input.questions ?? [];
         if (!questions.length) return out;
@@ -175,9 +191,10 @@ export function handleHookEvent(store, ev, now) {
 
     case 'PostToolUse': {
       session.state = 'working';
-      const d = store.findDialogForTool(sid, tool, payload.tool_use_id);
+      const d = DIALOG_TOOLS.has(tool)
+        ? store.findDialogForTool(sid, tool, payload.tool_use_id)
+        : permDialogForTool(store, sid, tool);
       if (!d || !isLive(d)) return [];
-      if (!DIALOG_TOOLS.has(tool) && d.kind !== 'perm') return [];
       if (d.source === 'telegram') {
         store.closeDialog(d.id, 'telegram');
         return d.kind === 'ask' ? mismatchEffects(store, d, payload) : [];

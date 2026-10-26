@@ -1,0 +1,10 @@
+{
+  "session_id": "5ffd73d3-6efd-46c0-8fd2-62eb19f0cb8c",
+  "transcript_path": "C:\\Users\\rus\\.claude\\projects\\C--Projects-tg-spike\\5ffd73d3-6efd-46c0-8fd2-62eb19f0cb8c.jsonl",
+  "cwd": "C:\\Projects\\tg-spike",
+  "scratchpad_dir": "C:\\Users\\rus\\AppData\\Local\\Temp\\claude\\C--Projects-tg-spike\\5ffd73d3-6efd-46c0-8fd2-62eb19f0cb8c\\scratchpad",
+  "hook_event_name": "SessionStart",
+  "source": "startup",
+  "model": "claude-opus-5-5",
+  "ppid": 42252
+}

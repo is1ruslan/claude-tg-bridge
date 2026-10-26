@@ -1,0 +1,11 @@
+{
+  "session_id": "5ffd73d3-6efd-46c0-8fd2-62eb19f0cb8c",
+  "transcript_path": "C:\\Users\\rus\\.claude\\projects\\C--Projects-tg-spike\\5ffd73d3-6efd-46c0-8fd2-62eb19f0cb8c.jsonl",
+  "cwd": "C:\\Projects\\tg-spike",
+  "scratchpad_dir": "C:\\Users\\rus\\AppData\\Local\\Temp\\claude\\C--Projects-tg-spike\\5ffd73d3-6efd-46c0-8fd2-62eb19f0cb8c\\scratchpad",
+  "prompt_id": "0fe7404a-5287-4fe4-98ee-fe37aed6a881",
+  "hook_event_name": "Notification",
+  "message": "Claude needs your permission",
+  "notification_type": "permission_prompt",
+  "ppid": 42732
+}

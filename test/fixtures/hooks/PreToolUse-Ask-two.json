@@ -1,0 +1,61 @@
+{
+  "session_id": "5ffd73d3-6efd-46c0-8fd2-62eb19f0cb8c",
+  "transcript_path": "C:\\Users\\rus\\.claude\\projects\\C--Projects-tg-spike\\5ffd73d3-6efd-46c0-8fd2-62eb19f0cb8c.jsonl",
+  "cwd": "C:\\Projects\\tg-spike",
+  "scratchpad_dir": "C:\\Users\\rus\\AppData\\Local\\Temp\\claude\\C--Projects-tg-spike\\5ffd73d3-6efd-46c0-8fd2-62eb19f0cb8c\\scratchpad",
+  "prompt_id": "66dd5c86-fa01-4d85-8f79-95da7c248171",
+  "permission_mode": "default",
+  "effort": {
+    "level": "medium"
+  },
+  "hook_event_name": "PreToolUse",
+  "tool_name": "AskUserQuestion",
+  "tool_input": {
+    "questions": [
+      {
+        "question": "Какой цвет?",
+        "header": "Цвет",
+        "options": [
+          {
+            "label": "Красный",
+            "description": "Красный цвет"
+          },
+          {
+            "label": "Зелёный",
+            "description": "Зелёный цвет"
+          },
+          {
+            "label": "Синий",
+            "description": "Синий цвет"
+          }
+        ],
+        "multiSelect": false
+      },
+      {
+        "question": "Какой размер?",
+        "header": "Размер",
+        "options": [
+          {
+            "label": "S",
+            "description": "Размер S"
+          },
+          {
+            "label": "M",
+            "description": "Размер M"
+          },
+          {
+            "label": "L",
+            "description": "Размер L"
+          },
+          {
+            "label": "XL",
+            "description": "Размер XL"
+          }
+        ],
+        "multiSelect": false
+      }
+    ]
+  },
+  "tool_use_id": "toolu_017FK4kUeUokaiR5PRKp6GW3",
+  "ppid": 12676
+}

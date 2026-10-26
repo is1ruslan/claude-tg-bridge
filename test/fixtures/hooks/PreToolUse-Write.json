@@ -1,0 +1,19 @@
+{
+  "session_id": "5ffd73d3-6efd-46c0-8fd2-62eb19f0cb8c",
+  "transcript_path": "C:\\Users\\rus\\.claude\\projects\\C--Projects-tg-spike\\5ffd73d3-6efd-46c0-8fd2-62eb19f0cb8c.jsonl",
+  "cwd": "C:\\Projects\\tg-spike",
+  "scratchpad_dir": "C:\\Users\\rus\\AppData\\Local\\Temp\\claude\\C--Projects-tg-spike\\5ffd73d3-6efd-46c0-8fd2-62eb19f0cb8c\\scratchpad",
+  "prompt_id": "3fbd03c0-48f7-4a7d-a8e7-9d21d0317675",
+  "permission_mode": "plan",
+  "effort": {
+    "level": "medium"
+  },
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Write",
+  "tool_input": {
+    "file_path": "C:\\Users\\rus\\.claude\\plans\\peppy-humming-octopus.md",
+    "content": "# План: создать hello.txt\n\n## Context\nНужно создать файл `hello.txt` с текстом «привет» в корне проекта `C:\\Projects\\tg-spike`.\n\n## Шаги\n1. Создать `C:\\Projects\\tg-spike\\hello.txt` инструментом Write с содержимым `привет` (UTF-8, без BOM).\n\n## Verification\n- Прочитать файл через Read и убедиться, что в нём ровно `привет`.\n"
+  },
+  "tool_use_id": "toolu_01PAUsvL6wjW4WTt4k197BFF",
+  "ppid": 24640
+}

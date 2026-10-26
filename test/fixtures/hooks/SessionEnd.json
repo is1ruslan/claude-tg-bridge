@@ -1,0 +1,10 @@
+{
+  "session_id": "01e809f3-811d-40cb-aaa9-5697ccb0fe3d",
+  "transcript_path": "C:\\Users\\rus\\.claude\\projects\\C--Projects-tg-spike\\01e809f3-811d-40cb-aaa9-5697ccb0fe3d.jsonl",
+  "cwd": "C:\\Projects\\tg-spike",
+  "scratchpad_dir": "C:\\Users\\rus\\AppData\\Local\\Temp\\claude\\C--Projects-tg-spike\\01e809f3-811d-40cb-aaa9-5697ccb0fe3d\\scratchpad",
+  "prompt_id": "1ab661f9-0609-4ea9-96bc-01fd4e8e81ec",
+  "hook_event_name": "SessionEnd",
+  "reason": "prompt_input_exit",
+  "ppid": 30632
+}

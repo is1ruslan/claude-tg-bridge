@@ -1,0 +1,37 @@
+{
+  "session_id": "5ffd73d3-6efd-46c0-8fd2-62eb19f0cb8c",
+  "transcript_path": "C:\\Users\\rus\\.claude\\projects\\C--Projects-tg-spike\\5ffd73d3-6efd-46c0-8fd2-62eb19f0cb8c.jsonl",
+  "cwd": "C:\\Projects\\tg-spike",
+  "scratchpad_dir": "C:\\Users\\rus\\AppData\\Local\\Temp\\claude\\C--Projects-tg-spike\\5ffd73d3-6efd-46c0-8fd2-62eb19f0cb8c\\scratchpad",
+  "prompt_id": "0fe7404a-5287-4fe4-98ee-fe37aed6a881",
+  "permission_mode": "default",
+  "effort": {
+    "level": "medium"
+  },
+  "hook_event_name": "PermissionRequest",
+  "tool_name": "AskUserQuestion",
+  "tool_input": {
+    "questions": [
+      {
+        "question": "Какой цвет?",
+        "header": "Цвет",
+        "options": [
+          {
+            "label": "Красный",
+            "description": "Красный цвет"
+          },
+          {
+            "label": "Зелёный",
+            "description": "Зелёный цвет"
+          },
+          {
+            "label": "Синий",
+            "description": "Синий цвет"
+          }
+        ],
+        "multiSelect": false
+      }
+    ]
+  },
+  "ppid": 33788
+}

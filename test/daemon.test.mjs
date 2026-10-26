@@ -1,0 +1,475 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { EventEmitter } from 'node:events';
+import { startDaemon } from '../src/daemon.mjs';
+import { runSupervisor } from '../src/supervisor.mjs';
+import { restrictToUser } from '../src/acl.mjs';
+import { paths as mkPaths } from '../src/config.mjs';
+import { TelegramError } from '../src/telegram.mjs';
+import { PLAN_FEEDBACK_INDEX } from '../src/keys.mjs';
+
+const FIX = new URL('./fixtures/hooks/', import.meta.url);
+const fx = (name, patch = {}) => ({ ...JSON.parse(fs.readFileSync(new URL(`${name}.json`, FIX), 'utf8')), ...patch });
+const SID = fx('SessionStart').session_id;
+const USER = 777;
+const STRANGER = 666;
+const CLAUDE_PID = 4242;
+
+const silent = { info() {}, warn() {}, error() {} };
+
+function recLog() {
+  const lines = [];
+  const w = (level) => (msg, data) => lines.push({ level, msg: String(msg), data });
+  return { lines, info: w('info'), warn: w('warn'), error: w('error') };
+}
+
+async function waitFor(cond, ms = 3000) {
+  const t0 = Date.now();
+  while (!(await cond())) {
+    if (Date.now() - t0 > ms) throw new Error('waitFor timeout');
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}
+
+function fakeTelegram() {
+  let nextId = 100;
+  const queue = [];
+  const tg = {
+    sent: [], edits: [], markups: [], answers: [], getUpdatesCalls: 0, failures: [],
+    push(...u) { queue.push(...u); },
+    async getUpdates(offset) {
+      tg.getUpdatesCalls++;
+      tg.lastOffset = offset;
+      if (tg.failures.length) throw tg.failures.shift();
+      if (queue.length) return queue.splice(0);
+      await new Promise((r) => setTimeout(r, 15));
+      return [];
+    },
+    async sendMessage(m) { const id = nextId++; tg.sent.push({ ...m, id }); return id; },
+    async editMessage(m) { tg.edits.push(m); },
+    async editMarkup(m) { tg.markups.push(m); },
+    async answerCallback(id, text) { tg.answers.push({ id, text }); },
+  };
+  return tg;
+}
+
+function fakeProcs({ alive = () => true } = {}) {
+  const p = {
+    ancestorCalls: [], aliveCalls: [],
+    async findAncestor(ppid) { p.ancestorCalls.push(ppid); return CLAUDE_PID; },
+    async isClaudeAlive(pid) { p.aliveCalls.push(pid); return alive(pid); },
+    async gitBranch() { return 'main'; },
+  };
+  return p;
+}
+
+function fakeInject(result = { ok: true }) {
+  const i = { calls: [], async injectSteps(pid, steps) { i.calls.push({ pid, steps }); return result; } };
+  return i;
+}
+
+async function setup(opts = {}) {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'cct-daemon-'));
+  const paths = mkPaths(home);
+  const telegram = opts.telegram ?? fakeTelegram();
+  const procs = opts.procs ?? fakeProcs();
+  const inject = opts.inject ?? fakeInject();
+  const log = opts.log ?? silent;
+  const d = await startDaemon({
+    config: { token: '123:TOKENxyz', userId: USER, port: 0, ...opts.config },
+    paths, telegram, inject, procs, log,
+    summarize: opts.summarize ?? (async (t) => ({ status: 'done', summary: t })),
+    port: 0,
+    backoffBaseMs: 5,
+    restrictToUser: async () => {},
+    claudeVersion: async () => '2.1.310 (Claude Code)',
+    pruneIntervalMs: 60_000,
+    ...opts.extra,
+  });
+  const dj = d ? JSON.parse(fs.readFileSync(paths.daemonJson, 'utf8')) : null;
+  const post = (body, secret = dj.secret) => fetch(`http://127.0.0.1:${d.port}/event`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', ...(secret ? { 'x-cc-secret': secret } : {}) },
+    body: JSON.stringify(body),
+  });
+  const hook = async (name, patch) => {
+    const payload = fx(name, patch);
+    const r = await post({ event: payload.hook_event_name, payload, ppid: 999 });
+    assert.equal(r.status, 204);
+  };
+  return { home, paths, telegram, procs, inject, log, d, dj, post, hook };
+}
+
+const cb = (data, id = 'cb1', from = USER) => ({
+  update_id: Math.floor(Math.random() * 1e6) + 10,
+  callback_query: { id, from: { id: from }, data, message: { message_id: 100, chat: { id: from, type: 'private' } } },
+});
+const msg = (text, from = USER, extra = {}) => ({
+  update_id: Math.floor(Math.random() * 1e6) + 10,
+  message: { message_id: 500, from: { id: from }, chat: { id: from, type: 'private' }, text, ...extra },
+});
+const dlgOf = (send) => send.keyboard[0][0].callback_data.split('|')[1];
+
+test('daemon.json written with port, secret (32 hex), pid', async () => {
+  const s = await setup();
+  try {
+    assert.equal(s.dj.port, s.d.port);
+    assert.match(s.dj.secret, /^[0-9a-f]{32}$/);
+    assert.equal(s.dj.pid, process.pid);
+  } finally { await s.d.close(); }
+});
+
+test('POST /event without or with wrong secret -> 403; /health needs secret', async () => {
+  const s = await setup();
+  try {
+    assert.equal((await s.post({ event: 'Stop', payload: {} }, null)).status, 403);
+    assert.equal((await s.post({ event: 'Stop', payload: {} }, 'nope')).status, 403);
+    const h0 = await fetch(`http://127.0.0.1:${s.d.port}/health`);
+    assert.equal(h0.status, 403);
+    const h = await fetch(`http://127.0.0.1:${s.d.port}/health`, { headers: { 'x-cc-secret': s.dj.secret } });
+    assert.deepEqual(await h.json(), { ok: true, sessions: 0 });
+    assert.equal(s.telegram.sent.length, 0);
+  } finally { await s.d.close(); }
+});
+
+test('PreToolUse-Ask-single -> one sendMessage; callback a| -> injectSteps with pid from findAncestor', async () => {
+  const s = await setup();
+  try {
+    await s.hook('SessionStart');
+    await s.hook('PreToolUse-Ask-single');
+    await waitFor(() => s.telegram.sent.length === 1);
+    await s.d.idle();
+    assert.equal(s.telegram.sent.length, 1);
+    const sent = s.telegram.sent[0];
+    assert.equal(sent.chatId, USER);
+    assert.deepEqual(s.procs.ancestorCalls, [999]); // only once: pid stored after SessionStart
+    const dlg = dlgOf(sent);
+    s.telegram.push(cb(`a|${dlg}|0|2`));
+    await waitFor(() => s.inject.calls.length === 1);
+    assert.equal(s.inject.calls[0].pid, CLAUDE_PID);
+    assert.ok(s.telegram.answers.some((a) => a.id === 'cb1'));
+    await waitFor(() => s.telegram.edits.length === 1);
+    assert.equal(s.telegram.edits[0].messageId, sent.id);
+    const h = await fetch(`http://127.0.0.1:${s.d.port}/health`, { headers: { 'x-cc-secret': s.dj.secret } });
+    assert.deepEqual(await h.json(), { ok: true, sessions: 1 });
+  } finally { await s.d.close(); }
+});
+
+test('RF-1: updates from a stranger -> no Telegram calls, no inject, logged without text', async () => {
+  const log = recLog();
+  const s = await setup({ log });
+  try {
+    await s.hook('SessionStart');
+    await s.hook('PreToolUse-Ask-single');
+    await waitFor(() => s.telegram.sent.length === 1);
+    await s.d.idle();
+    const dlg = dlgOf(s.telegram.sent[0]);
+    const aliveBefore = s.procs.aliveCalls.length;
+    s.telegram.push(cb(`a|${dlg}|0|1`, 'cbX', STRANGER), msg('rm -rf secret-text', STRANGER), msg('/stop', STRANGER));
+    await waitFor(() => log.lines.filter((l) => l.msg === `ignored update from ${STRANGER}`).length === 3);
+    await s.d.idle();
+    assert.equal(s.telegram.sent.length, 1);
+    assert.equal(s.telegram.answers.length, 0);
+    assert.equal(s.telegram.edits.length + s.telegram.markups.length, 0);
+    assert.equal(s.inject.calls.length, 0);
+    assert.equal(s.procs.aliveCalls.length, aliveBefore);
+    assert.ok(!JSON.stringify(log.lines).includes('secret-text'));
+  } finally { await s.d.close(); }
+});
+
+test('RF-5: isClaudeAlive false at inject time -> no inject, "Сессия завершена" sent', async () => {
+  let n = 0;
+  // alive for the pre-update prune, dead at the inject check (pid reused / process died meanwhile)
+  const procs = fakeProcs({ alive: () => n++ === 0 });
+  const s = await setup({ procs });
+  try {
+    await s.hook('SessionStart');
+    await s.hook('PreToolUse-Ask-single');
+    await waitFor(() => s.telegram.sent.length === 1);
+    s.telegram.push(cb(`a|${dlgOf(s.telegram.sent[0])}|0|1`));
+    await waitFor(() => s.telegram.sent.some((m) => m.text.startsWith('Сессия завершена: ')));
+    await s.d.idle();
+    assert.equal(s.inject.calls.length, 0);
+  } finally { await s.d.close(); }
+});
+
+test('dead pid is pruned before a Telegram update: session removed, nothing injected', async () => {
+  const s = await setup({ procs: fakeProcs({ alive: () => false }) });
+  try {
+    await s.hook('SessionStart');
+    await s.d.idle();
+    s.telegram.push(msg('сделай что-нибудь'));
+    await waitFor(() => s.telegram.sent.some((m) => m.text === 'Нет активных сессий'));
+    assert.equal(s.inject.calls.length, 0);
+    const h = await fetch(`http://127.0.0.1:${s.d.port}/health`, { headers: { 'x-cc-secret': s.dj.secret } });
+    assert.deepEqual(await h.json(), { ok: true, sessions: 0 });
+  } finally { await s.d.close(); }
+});
+
+test('inject {ok:false} -> warning sent', async () => {
+  const s = await setup({ inject: fakeInject({ ok: false, error: 'boom' }) });
+  try {
+    await s.hook('SessionStart');
+    s.telegram.push(msg('привет'));
+    await waitFor(() => s.telegram.sent.some((m) => m.text.includes('⚠ не удалось ввести в терминал: boom')));
+  } finally { await s.d.close(); }
+});
+
+test('verify: dialog not closed within timeoutMs -> warning; closed -> no warning', async () => {
+  const s = await setup({ extra: { verifyTimeoutMs: 150 } });
+  try {
+    await s.hook('SessionStart');
+    await s.hook('PreToolUse-Ask-single');
+    await waitFor(() => s.telegram.sent.length === 1);
+    s.telegram.push(cb(`a|${dlgOf(s.telegram.sent[0])}|0|1`));
+    await waitFor(() => s.telegram.sent.some((m) => m.text.includes('⚠ не удалось подтвердить ответ — проверьте терминал')));
+    // second dialog: PostToolUse arrives in time
+    const before = s.telegram.sent.length;
+    await s.hook('PreToolUse-Ask-single', { tool_use_id: 'toolu_second' });
+    await waitFor(() => s.telegram.sent.length === before + 1);
+    const send2 = s.telegram.sent.at(-1);
+    s.telegram.push(cb(`a|${dlgOf(send2)}|0|1`, 'cb2'));
+    await waitFor(() => s.inject.calls.length === 2);
+    const r = await s.post({ event: 'PostToolUse', ppid: 999, payload: {
+      session_id: SID, cwd: 'C:\Projects\tg-spike', tool_name: 'AskUserQuestion', tool_use_id: 'toolu_second',
+      tool_response: { answers: { 'Какой цвет?': 'Красный' } },
+    } });
+    assert.equal(r.status, 204);
+    await new Promise((r) => setTimeout(r, 300));
+    await s.d.idle();
+    const warns = s.telegram.sent.filter((m) => m.text.includes('не удалось подтвердить'));
+    assert.equal(warns.length, 1);
+  } finally { await s.d.close(); }
+});
+
+test('bind contract: prompt binds only; dialog sends push to messageIds; edit text:null -> editMarkup', async () => {
+  const s = await setup();
+  try {
+    await s.hook('SessionStart');
+    await s.hook('PreToolUse-ExitPlanMode');
+    await waitFor(() => s.telegram.sent.length === 1);
+    const planMsg = s.telegram.sent[0];
+    const dlg = dlgOf(planMsg);
+    // plan feedback option -> force-reply prompt (bind.prompt)
+    s.telegram.push(cb(`p|${dlg}|${PLAN_FEEDBACK_INDEX + 1}`));
+    await waitFor(() => s.telegram.sent.length === 2);
+    const prompt = s.telegram.sent[1];
+    assert.equal(prompt.forceReply, true);
+    await s.d.idle();
+    const st = s.d.store;
+    assert.deepEqual(st.lookupMessage(prompt.id), { sessionId: SID, dialogId: dlg });
+    assert.deepEqual(st.getDialog(dlg).messageIds, [planMsg.id]);
+    assert.deepEqual(st.lookupMessage(planMsg.id), { sessionId: SID, dialogId: dlg });
+
+    // text:null edit -> editMarkup
+    st.getDialog(dlg).text = 'x'.repeat(5000);
+    s.telegram.push(msg('поправь план', USER, { reply_to_message: { message_id: prompt.id } }));
+    await waitFor(() => s.telegram.markups.length === 1);
+    assert.deepEqual(s.telegram.markups[0], { chatId: USER, messageId: planMsg.id, keyboard: null });
+    await waitFor(() => s.inject.calls.length === 1);
+  } finally { await s.d.close(); }
+});
+
+test('completion -> summarize -> completionText sent and bound to session', async () => {
+  const calls = [];
+  const s = await setup({ summarize: async (t, o) => { calls.push({ t, o }); return { status: 'error', summary: '' }; } });
+  try {
+    await s.hook('SessionStart');
+    await s.post({ event: 'StopFailure', payload: { session_id: SID, cwd: 'C:\\Projects\\tg-spike', error: 'oops' }, ppid: 999 });
+    await waitFor(() => s.telegram.sent.length === 1);
+    assert.deepEqual(calls, [{ t: 'oops', o: { failed: true } }]);
+    assert.match(s.telegram.sent[0].text, /❌ ошибка/);
+    assert.match(s.telegram.sent[0].text, /\(пустой ответ\)/);
+    await s.d.idle();
+    assert.deepEqual(s.d.store.lookupMessage(s.telegram.sent[0].id), { sessionId: SID });
+  } finally { await s.d.close(); }
+});
+
+test('effect error is logged and does not stop the following effects', async () => {
+  const log = recLog();
+  const telegram = fakeTelegram();
+  telegram.answerCallback = async () => { throw new Error('answer failed'); };
+  const s = await setup({ telegram, log });
+  try {
+    await s.hook('SessionStart');
+    await s.hook('PreToolUse-Ask-single');
+    await waitFor(() => telegram.sent.length === 1);
+    s.telegram.push(cb(`a|${dlgOf(telegram.sent[0])}|0|1`));
+    await waitFor(() => s.inject.calls.length === 1);
+    assert.ok(log.lines.some((l) => l.level === 'error' && /answer failed/.test(JSON.stringify(l))));
+  } finally { await s.d.close(); }
+});
+
+test('RF-4: getUpdates throws twice -> third call happens with exponential backoff', async () => {
+  const telegram = fakeTelegram();
+  telegram.failures.push(new Error('net down'), new Error('net down'));
+  const waits = [];
+  const s = await setup({ telegram, extra: { sleep: async (ms) => { waits.push(ms); } } });
+  try {
+    await waitFor(() => telegram.getUpdatesCalls >= 3);
+    assert.deepEqual(waits.slice(0, 2), [5, 10]);
+  } finally { await s.d.close(); }
+});
+
+test('429 -> waits retry_after seconds', async () => {
+  const telegram = fakeTelegram();
+  telegram.failures.push(new TelegramError('getUpdates', 429, 'Too Many Requests', 3));
+  const waits = [];
+  const s = await setup({ telegram, extra: { sleep: async (ms) => { waits.push(ms); } } });
+  try {
+    await waitFor(() => telegram.getUpdatesCalls >= 2);
+    assert.equal(waits[0], 3000);
+  } finally { await s.d.close(); }
+});
+
+test('offset persisted to state/offset and reused on restart', async () => {
+  const s = await setup();
+  try {
+    s.telegram.push({ update_id: 41, message: { message_id: 1, from: { id: STRANGER }, chat: { id: STRANGER, type: 'private' }, text: 'x' } });
+    await waitFor(() => fs.existsSync(path.join(s.paths.stateDir, 'offset')) && fs.readFileSync(path.join(s.paths.stateDir, 'offset'), 'utf8').trim() === '42');
+  } finally { await s.d.close(); }
+  const telegram = fakeTelegram();
+  const d2 = await startDaemon({
+    config: { token: '123:TOKENxyz', userId: USER }, paths: s.paths, telegram, inject: fakeInject(), procs: fakeProcs(),
+    summarize: async () => ({}), log: silent, port: 0, restrictToUser: async () => {}, claudeVersion: async () => 'v',
+  });
+  try {
+    await waitFor(() => telegram.getUpdatesCalls >= 1);
+    assert.equal(telegram.lastOffset, 42);
+  } finally { await d2.close(); }
+});
+
+test('snapshot saved (debounced) and loaded at start; corrupt snapshot -> empty store', async () => {
+  const s = await setup({ extra: { snapshotDebounceMs: 20 } });
+  try {
+    await s.hook('SessionStart');
+    await waitFor(() => fs.existsSync(s.paths.snapshot));
+    const snap = JSON.parse(fs.readFileSync(s.paths.snapshot, 'utf8'));
+    assert.equal(snap.sessions[0].id, SID);
+    assert.equal(snap.sessions[0].pid, CLAUDE_PID);
+  } finally { await s.d.close(); }
+  const mk = (log) => startDaemon({
+    config: { token: '123:TOKENxyz', userId: USER }, paths: s.paths, telegram: fakeTelegram(), inject: fakeInject(), procs: fakeProcs(),
+    summarize: async () => ({}), log, port: 0, restrictToUser: async () => {}, claudeVersion: async () => 'v',
+  });
+  const d2 = await mk(silent);
+  try { assert.equal(d2.store.getSession(SID).pid, CLAUDE_PID); } finally { await d2.close(); }
+  fs.writeFileSync(s.paths.snapshot, '{not json');
+  const log = recLog();
+  const d3 = await mk(log);
+  try {
+    assert.equal(d3.store.sessions.size, 0);
+    assert.ok(log.lines.some((l) => /snapshot/.test(l.msg)));
+  } finally { await d3.close(); }
+});
+
+test('prune timer: dead session gets SessionEnd treatment (dialog message edited stale)', async () => {
+  let alive = true;
+  const s = await setup({ procs: fakeProcs({ alive: () => alive }), extra: { pruneIntervalMs: 30 } });
+  try {
+    await s.hook('SessionStart');
+    await s.hook('PreToolUse-Ask-single');
+    await waitFor(() => s.telegram.sent.length === 1);
+    alive = false;
+    await waitFor(() => s.d.store.sessions.size === 0);
+    await waitFor(() => s.telegram.edits.length === 1);
+    assert.equal(s.telegram.edits[0].messageId, s.telegram.sent[0].id);
+  } finally { await s.d.close(); }
+});
+
+test('missing token or userId -> exit(3)', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'cct-daemon-'));
+  const codes = [];
+  const r = await startDaemon({
+    config: { token: '', userId: null }, paths: mkPaths(home), telegram: fakeTelegram(), inject: fakeInject(), procs: fakeProcs(),
+    summarize: async () => ({}), log: silent, port: 0, exit: (c) => codes.push(c), restrictToUser: async () => {}, claudeVersion: async () => 'v',
+  });
+  assert.equal(r, null);
+  assert.deepEqual(codes, [3]);
+});
+
+test('port in use -> log + exit(1)', async () => {
+  const s = await setup();
+  const codes = [];
+  const log = recLog();
+  try {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'cct-daemon-'));
+    const r = await startDaemon({
+      config: { token: '123:TOKENxyz', userId: USER }, paths: mkPaths(home), telegram: fakeTelegram(), inject: fakeInject(), procs: fakeProcs(),
+      summarize: async () => ({}), log, port: s.d.port, exit: (c) => codes.push(c), restrictToUser: async () => {}, claudeVersion: async () => 'v',
+    });
+    assert.equal(r, null);
+    assert.deepEqual(codes, [1]);
+    assert.ok(log.lines.some((l) => l.level === 'error' && /port/i.test(l.msg)));
+  } finally { await s.d.close(); }
+});
+
+test('logs Claude Code version at start', async () => {
+  const log = recLog();
+  const s = await setup({ log });
+  try {
+    await waitFor(() => log.lines.some((l) => l.msg.includes('2.1.310')));
+  } finally { await s.d.close(); }
+});
+
+// ---------- supervisor ----------
+
+function fakeSpawner(codes) {
+  const calls = [];
+  const spawn = (cmd, args, opts) => {
+    calls.push({ cmd, args, opts });
+    const child = new EventEmitter();
+    const code = codes.shift();
+    setImmediate(() => child.emit('exit', code ?? 3, null));
+    return child;
+  };
+  return { calls, spawn };
+}
+
+test('supervisor: restarts on crash with backoff, stops on exit 3', async () => {
+  const { calls, spawn } = fakeSpawner([2, 2, 3]);
+  const waits = [];
+  const code = await runSupervisor({ spawn, sleep: async (ms) => { waits.push(ms); }, log: silent, daemonPath: 'D:\\x\\daemon.mjs' });
+  assert.equal(calls.length, 3);
+  assert.equal(calls[0].cmd, process.execPath);
+  assert.deepEqual(calls[0].args, ['D:\\x\\daemon.mjs']);
+  assert.equal(calls[0].opts.windowsHide, true);
+  assert.equal(calls[0].opts.stdio, 'ignore');
+  assert.deepEqual(waits, [2000, 4000]);
+  assert.equal(code, 0);
+});
+
+test('supervisor: exit 1 three times in a row -> stop (another instance running)', async () => {
+  const { calls, spawn } = fakeSpawner([1, 1, 1, 1]);
+  await runSupervisor({ spawn, sleep: async () => {}, log: silent, daemonPath: 'd.mjs' });
+  assert.equal(calls.length, 3);
+});
+
+test('supervisor: backoff capped at 60s and reset after 5 min uptime', async () => {
+  const { spawn } = fakeSpawner([2, 2, 2, 2, 2, 2, 2, 2, 3]);
+  const waits = [];
+  const ups = [0, 0, 0, 0, 0, 0, 0, 6 * 60_000, 0];
+  let t = 0, i = 0, phase = 0;
+  const now = () => { if (phase === 0) { phase = 1; return t; } phase = 0; t += ups[i++] ?? 0; return t; };
+  await runSupervisor({ spawn, sleep: async (ms) => { waits.push(ms); }, log: silent, daemonPath: 'd.mjs', now });
+  assert.ok(waits.every((w) => w <= 60_000));
+  assert.ok(waits.includes(60_000));
+  assert.equal(waits.at(-1), 2000);
+});
+
+test('restrictToUser runs icacls with inheritance removed and logs errors without throwing', async () => {
+  const calls = [];
+  await restrictToUser('C:\\x\\daemon.json', {
+    user: 'bob', log: silent,
+    execFile: (cmd, args, opts, cb) => { calls.push({ cmd, args, opts }); cb(null, '', ''); },
+  });
+  assert.equal(calls[0].cmd, 'icacls');
+  assert.deepEqual(calls[0].args, ['C:\\x\\daemon.json', '/inheritance:r', '/grant:r', 'bob:F']);
+  assert.equal(calls[0].opts.windowsHide, true);
+  const log = recLog();
+  await restrictToUser('p', { user: 'bob', log, execFile: (c, a, o, cb) => cb(new Error('denied')) });
+  assert.ok(log.lines.some((l) => l.level === 'error'));
+});

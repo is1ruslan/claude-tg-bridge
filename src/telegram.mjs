@@ -3,12 +3,13 @@ import { maskSecrets } from './config.mjs';
 const MAX_LEN = 4096;
 
 export class TelegramError extends Error {
-  constructor(method, errorCode, description) {
+  constructor(method, errorCode, description, retryAfter) {
     super(`${method} failed: ${errorCode} ${description}`);
     this.name = 'TelegramError';
     this.method = method;
     this.errorCode = errorCode;
     this.description = description;
+    if (Number.isFinite(retryAfter)) this.retryAfter = retryAfter;
   }
 }
 
@@ -55,6 +56,7 @@ export function createTelegram({ token, fetch = globalThis.fetch, log } = {}) {
         method,
         data?.error_code,
         mask(String(data?.description ?? 'unknown error')),
+        data?.parameters?.retry_after,
       );
       logger.warn(err.message);
       throw err;
@@ -96,6 +98,15 @@ export function createTelegram({ token, fetch = globalThis.fetch, log } = {}) {
       else if (keyboard) params.reply_markup = { inline_keyboard: keyboard };
       try {
         await call('editMessageText', params);
+      } catch (e) {
+        if (e instanceof TelegramError && /message is not modified/i.test(e.description)) return;
+        throw e;
+      }
+    },
+
+    async editMarkup({ chatId, messageId, keyboard }) {
+      try {
+        await call('editMessageReplyMarkup', { chat_id: chatId, message_id: messageId, reply_markup: { inline_keyboard: keyboard ?? [] } });
       } catch (e) {
         if (e instanceof TelegramError && /message is not modified/i.test(e.description)) return;
         throw e;

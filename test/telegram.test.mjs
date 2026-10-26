@@ -87,3 +87,27 @@ test('network error message has token masked', async () => {
   const tg = createTelegram({ token: TOKEN, fetch });
   await assert.rejects(tg.getMe(), (err) => !String(err.message).includes('SECRETTOKEN'));
 });
+
+test('editMarkup posts editMessageReplyMarkup, null keyboard -> empty, swallows not modified', async () => {
+  const { calls, fetch } = stub([
+    { ok: true, result: true },
+    { ok: false, error_code: 400, description: 'Bad Request: message is not modified' },
+  ]);
+  const tg = createTelegram({ token: TOKEN, fetch });
+  await tg.editMarkup({ chatId: 1, messageId: 2, keyboard: null });
+  assert.ok(calls[0].url.endsWith('/editMessageReplyMarkup'));
+  assert.deepEqual(calls[0].body, { chat_id: 1, message_id: 2, reply_markup: { inline_keyboard: [] } });
+  await tg.editMarkup({ chatId: 1, messageId: 2, keyboard: [[{ text: 'k', callback_data: 'z' }]] });
+  assert.equal(calls[1].body.reply_markup.inline_keyboard[0][0].text, 'k');
+});
+
+test('429 TelegramError carries retryAfter', async () => {
+  const { fetch } = stub([{ ok: false, error_code: 429, description: 'Too Many Requests', parameters: { retry_after: 7 } }]);
+  const tg = createTelegram({ token: TOKEN, fetch });
+  await assert.rejects(tg.getUpdates(0), (err) => {
+    assert.ok(err instanceof TelegramError);
+    assert.equal(err.errorCode, 429);
+    assert.equal(err.retryAfter, 7);
+    return true;
+  });
+});

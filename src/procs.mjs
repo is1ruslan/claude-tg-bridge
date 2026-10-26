@@ -1,7 +1,11 @@
 import { execFile } from 'node:child_process';
 import path from 'node:path';
 
-const PS_CMD = 'Get-CimInstance Win32_Process | Select ProcessId,ParentProcessId,Name | ConvertTo-Json -Compress';
+// StartedAt: creation time as Unix ms (same representation as `inject.exe --ancestor`), null if unknown.
+const PS_CMD = 'Get-CimInstance Win32_Process | Select ProcessId,ParentProcessId,Name,'
+  + '@{n="StartedAt";e={if ($_.CreationDate) { ([DateTimeOffset]$_.CreationDate).ToUnixTimeMilliseconds() } else { $null }}}'
+  + ' | ConvertTo-Json -Compress';
+export const START_TOLERANCE_MS = 2000;
 
 export function listProcs() {
   return new Promise((resolve) => {
@@ -13,7 +17,10 @@ export function listProcs() {
           let arr = JSON.parse(String(stdout));
           if (!Array.isArray(arr)) arr = [arr];
           for (const p of arr) {
-            if (p && Number.isInteger(p.ProcessId)) map.set(p.ProcessId, { name: String(p.Name ?? ''), ppid: p.ParentProcessId });
+            if (p && Number.isInteger(p.ProcessId)) map.set(p.ProcessId, {
+              name: String(p.Name ?? ''), ppid: p.ParentProcessId,
+              startedAt: Number.isFinite(p.StartedAt) ? p.StartedAt : null,
+            });
           }
         } catch { /* unknown */ }
         resolve(map);
@@ -37,9 +44,13 @@ export async function findAncestor(pid, name = 'claude.exe', { listProcs: lp = l
   return null;
 }
 
-export async function isClaudeAlive(pid, { listProcs: lp = listProcs } = {}) {
+// startedAt (Unix ms, optional): guards against a reused pid — when both it and the process's
+// creation time are known they must match within ±2 s.
+export async function isClaudeAlive(pid, { listProcs: lp = listProcs, startedAt } = {}) {
   const p = (await lp()).get(pid);
-  return !!p && p.name.toLowerCase() === 'claude.exe';
+  if (!p || p.name.toLowerCase() !== 'claude.exe') return false;
+  if (Number.isFinite(startedAt) && Number.isFinite(p.startedAt)) return Math.abs(p.startedAt - startedAt) <= START_TOLERANCE_MS;
+  return true;
 }
 
 function git(cwd, args) {

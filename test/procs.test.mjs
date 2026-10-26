@@ -51,3 +51,22 @@ test('projectName', () => {
   assert.equal(projectName(p), 'cc-telegram');
   assert.equal(projectName(p + bs), 'cc-telegram');
 });
+
+// F1b: PID reuse guard via process creation time (Unix ms).
+const withStart = (entries) => async () => new Map(entries.map(([pid, name, ppid, startedAt]) => [pid, { name, ppid, startedAt }]));
+test('F1b: isClaudeAlive with startedAt requires a match within ±2 s', async () => {
+  const lp = withStart([[100, 'claude.exe', 4, 1_000_000]]);
+  assert.equal(await isClaudeAlive(100, { listProcs: lp, startedAt: 1_000_000 }), true);
+  assert.equal(await isClaudeAlive(100, { listProcs: lp, startedAt: 1_001_999 }), true);
+  assert.equal(await isClaudeAlive(100, { listProcs: lp, startedAt: 998_001 }), true);
+  assert.equal(await isClaudeAlive(100, { listProcs: lp, startedAt: 1_002_500 }), false, 'pid reused by a newer claude.exe');
+  assert.equal(await isClaudeAlive(100, { listProcs: lp }), true, 'unknown startedAt -> name check only');
+  assert.equal(await isClaudeAlive(100, { listProcs: withStart([[100, 'claude.exe', 4, null]]), startedAt: 1_000_000 }), true, 'proc creation unknown -> name check only');
+});
+test('F1b: listProcs (real) returns startedAt as Unix ms for this process', async () => {
+  const m = await listProcs();
+  const me = m.get(process.pid);
+  const started = Date.now() - performance.now();
+  assert.equal(typeof me?.startedAt, 'number');
+  assert.ok(Math.abs(me.startedAt - started) < 2000, `${me.startedAt} vs ${started}`);
+});

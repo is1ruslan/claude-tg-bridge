@@ -3,10 +3,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { paths as getPaths, isDisabled, maskSecrets } from './config.mjs';
+import { needsAncestor, claudeAncestor, truncateDeep, capLogFile } from './hookutil.mjs';
 
 const T0 = Date.now();
 const BUDGET_MS = 1900;
-const STDIN_MAX = 1024 * 1024;
+const STDIN_MAX = 16 * 1024 * 1024;
 const STDIN_TIMEOUT_MS = 1000;
 const POST_TIMEOUT_MS = 1500;
 
@@ -21,7 +22,9 @@ function logError(msg) {
     const p = getPaths();
     fs.mkdirSync(p.logsDir, { recursive: true });
     const line = `${new Date().toISOString()} ${event.replace(/\s/g, '_') || '-'} ${maskSecrets(String(msg), [secret]).replace(/\s+/g, ' ').slice(0, 300)}\n`;
-    fs.appendFileSync(path.join(p.logsDir, 'hook-errors.log'), line);
+    const file = path.join(p.logsDir, 'hook-errors.log');
+    capLogFile(file);
+    fs.appendFileSync(file, line);
   } catch { /* nothing else we can do */ }
 }
 
@@ -54,11 +57,14 @@ async function main() {
   secret = String(info?.secret ?? '');
   const port = Number(info?.port);
   if (!Number.isInteger(port) || port <= 0 || !secret) throw new Error('daemon.json invalid');
+  const body = { event, payload: truncateDeep(payload), ppid: process.ppid };
+  // Resolve claude.exe now, while our parent chain is alive (spawnSync, <= 800 ms; failure -> omitted).
+  if (needsAncestor(event, payload)) Object.assign(body, claudeAncestor(process.ppid) ?? {});
   const left = Math.max(100, Math.min(POST_TIMEOUT_MS, BUDGET_MS - 100 - (Date.now() - T0)));
   const res = await fetch(`http://127.0.0.1:${port}/event`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-cc-secret': secret },
-    body: JSON.stringify({ event, payload, ppid: process.ppid }),
+    body: JSON.stringify(body),
     signal: AbortSignal.timeout(left),
   });
   if (res.status !== 204) throw new Error(`daemon replied ${res.status}`);

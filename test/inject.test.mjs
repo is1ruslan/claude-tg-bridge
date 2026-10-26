@@ -60,3 +60,32 @@ test('nonexistent pid yields ok:false', { skip: !win }, async (t) => {
   assert.equal(r.ok, false);
   assert.match(r.error, /^err attach /);
 });
+
+// F1: --ancestor <pid> <name> walks the parent chain via a toolhelp snapshot.
+test('inject.exe --ancestor <process.pid> node.exe -> ok <this pid> <creation ms>', (t) => {
+  if (skip) return t.skip(String(skip));
+  const r = spawnSync(exe, ['--ancestor', String(process.pid), 'node.exe'], { encoding: 'utf8', windowsHide: true, timeout: 5000, input: '' });
+  assert.equal(r.status, 0);
+  const m = /^ok (\d+) (\d+)\s*$/.exec(r.stdout);
+  assert.ok(m, `stdout: ${r.stdout}`);
+  assert.equal(Number(m[1]), process.pid);
+  const started = Date.now() - performance.now();
+  assert.ok(Math.abs(Number(m[2]) - started) < 2000, `creation ${m[2]} vs ${started}`);
+});
+
+test('inject.exe --ancestor: walks up to the parent (case-insensitive), "none" when no match', async (t) => {
+  if (skip) return t.skip(String(skip));
+  const { spawn } = await import('node:child_process');
+  // cmd.exe is our child: walking up from it for NODE.EXE must land on this process.
+  const child = spawn('cmd.exe', ['/d', '/c', 'ping -n 4 127.0.0.1 >nul'], { windowsHide: true, stdio: 'ignore' });
+  try {
+    await wait(200);
+    const up = spawnSync(exe, ['--ancestor', String(child.pid), 'NODE.EXE'], { encoding: 'utf8', windowsHide: true, timeout: 5000, input: '' });
+    const m = /^ok (\d+) \d+/.exec(up.stdout);
+    assert.ok(m, `stdout: ${up.stdout}`);
+    assert.equal(Number(m[1]), process.pid);
+  } finally { child.kill(); }
+  const none = spawnSync(exe, ['--ancestor', String(process.pid), 'no-such-process.exe'], { encoding: 'utf8', windowsHide: true, timeout: 5000, input: '' });
+  assert.equal(none.status, 0);
+  assert.equal(none.stdout.trim(), 'none');
+});

@@ -172,7 +172,11 @@ callback_data (≤ 64 байт): `a|<dlg>|<q>|<opt>` выбор, `t|<dlg>|<q>|<o
   - `permissionSequence(optionIndex)`
   - `instructionSequence(text)` → `[{text}, {sleep:400}, {key:'ENTER'}]`
   - `stopSequence()` → `[{key:'ESC'}]`
-- Ожидаемое по эксперименту (подтвердить keymap'ом): одиночный выбор k (0-based) → `[{text:String(k+1)}]`; «Другое» при N вариантах → `N × DOWN`, `{text}`, `{sleep:400}`, `ENTER`; multi `[i…]` → для каждого `i` по возрастанию DOWN до i и `ENTER`, затем DOWN до строки `Submit` и `ENTER`; экран Review → `ENTER`. Между шагами без явного `sleep` исполнитель сам ставит 150 мс (Task 4).
+  - `PLAN_OPTIONS = ['✅ Да, auto mode', '✅ Да, правки вручную', '✏️ Изменить план']`, `PLAN_FEEDBACK_INDEX = 2` (0-based; пункт с полем текста)
+  - `permissionOptions(permission_suggestions = []) → string[]` → `['✅ Да', ...suggestions.map(describeSuggestion), '⛔ Нет']` (`describeSuggestion` — короткое русское описание по `type`/`mode`/`rules`, напр. `✅ Да + режим acceptEdits`)
+  - `planSequence(k, text?)`: без текста → `[{text:String(k+1)}]`; с текстом (k = PLAN_FEEDBACK_INDEX) → `[{text:'3'}, {text}, {sleep:400}, {key:'ENTER'}]`
+  - `permissionSequence(k)` → `[{text:String(k+1)}]`
+- Ожидаемое по эксперименту (подтвердить keymap'ом): одиночный выбор k (0-based) → `[{text:String(k+1)}]`; «Другое» при N вариантах → `N × DOWN`, `{text}`, `{sleep:400}`, `ENTER`; multi `[i…]` → цифра `String(i+1)` на каждый (курсор не двигается, остаётся на пункте 1), затем `(N+1) × DOWN` до строки `Submit` и `ENTER`; экран Review (есть после multi-вопроса и после последнего из нескольких вопросов; нет для одного одиночного) → `{sleep:400}`, `ENTER`. Подтверждено в Task 0 (`docs/ui-keymap.md`). Между шагами без явного `sleep` исполнитель сам ставит 150 мс (Task 4).
 
 - [ ] **Step 1: Failing tests** по таблице keymap, минимум: одиночный 2 из 3 → `[{text:'2'}]`; 4 варианта, «Другое» «Ананас» → 4×DOWN, text, sleep 400, ENTER; multi [0,2] из 4; два вопроса (option 1 + other); `instructionSequence('привет')`; ни одна последовательность не доходит курсором до строки N+2 (проверка: максимальная позиция курсора в одиночном вопросе ≤ N, считая с 0).
 - [ ] **Step 2:** FAIL
@@ -292,7 +296,8 @@ callback_data (≤ 64 байт): `a|<dlg>|<q>|<opt>` выбор, `t|<dlg>|<q>|<o
   - `UserPromptSubmit` → state working, lastPromptAt=now; открытые диалоги сессии → closed('stale'), для каждого `edit` с `resolvedSuffix('stale')`, keyboard null.
   - `PreToolUse` + `AskUserQuestion` → openDialog kind ask; state waiting; `send` askText/askKeyboard первого вопроса, `bind {sessionId, dialogId}`.
   - `PreToolUse` + `ExitPlanMode` → dialog plan, options из keymap (константа `PLAN_OPTIONS` в `keys.mjs`), `send` planText + optionsKeyboard.
-  - `PermissionRequest` → dialog perm, options `PERMISSION_OPTIONS` из `keys.mjs`, `send`.
+  - `PermissionRequest` → если `tool_name` ∈ {AskUserQuestion, ExitPlanMode} — **игнорировать** (дубликат PreToolUse, см. keymap). Иначе dialog perm, options = `permissionOptions(payload.permission_suggestions)`, `send`.
+  - **Любое** событие сессии (PreToolUse/PostToolUse другого инструмента, повторный PreToolUse ExitPlanMode, UserPromptSubmit, Stop), кроме PermissionRequest/Notification, при открытом plan/perm-диалоге, у которого нет своего PostToolUse → диалог закрыт: source telegram → просто `edit` (✔ выбрано), иначе → `resolvedSuffix('terminal')`. Причина: отказ (No / «Изменить план») не порождает событий.
   - `PostToolUse` для tool диалога (findDialogForTool): если dialog.source ≠ 'telegram' → closed('terminal'), `edit` всех messageIds с `resolvedSuffix('terminal')`; если 'telegram' → сравнить `tool_response` (формат из фикстуры) с dialog.answers; расхождение → `send` `⚠ в сессию ушло «X», а не «Y» — проверьте терминал`. В обоих случаях state working.
   - `PostToolUse` любого другого инструмента → закрыть открытый perm-диалог сессии как 'terminal' (если он не 'telegram').
   - `Stop` → state idle; если `lastPromptAt` и `now - lastPromptAt ≥ 60000` → `completion {lastMessage: payload.last_assistant_message, failed:false}`; закрыть висящие диалоги 'stale'.
@@ -300,7 +305,7 @@ callback_data (≤ 64 байт): `a|<dlg>|<q>|<opt>` выбор, `t|<dlg>|<q>|<o
   - `SessionEnd` → removeSession, edit висящих диалогов 'stale'.
   - Неизвестная сессия (нет SessionStart, демон перезапускался) → создать её из payload.cwd на лету.
 
-- [ ] **Step 1: Failing tests** (фикстуры): Pre Ask single → 1 send с 4 кнопками (3+Другое) и bind; затем Post без ответа из Telegram → edit с «отвечено в терминале» (RF-2 подготовка); Stop через 30 с после UserPromptSubmit → нет completion; через 61 с → completion; StopFailure → completion failed; UserPromptSubmit при открытом диалоге → edit «устарело»; Post с ответом, не совпавшим с dialog.answers при source telegram → send ⚠; событие от неизвестной сессии → сессия создана.
+- [ ] **Step 1: Failing tests** (фикстуры из `test/fixtures/hooks/`; имена: `PreToolUse-Ask-single|two|multi`, `PostToolUse-Ask-other|two|multi`, `PermissionRequest-Ask|ExitPlanMode|Write`, `PreToolUse-ExitPlanMode`, `PostToolUse-ExitPlanMode`, `PreToolUse-Write`, `PostToolUse-Write`, `Stop`, `SessionStart`, `SessionEnd`, `UserPromptSubmit`; StopFailure-фикстуры нет — сконструировать по общим полям): PermissionRequest-Ask → `[]`; PermissionRequest-Write → send с 3 кнопками; затем PreToolUse другого инструмента → edit «отвечено в терминале»; Pre Ask single → 1 send с 4 кнопками (3+Другое) и bind; затем Post без ответа из Telegram → edit с «отвечено в терминале» (RF-2 подготовка); Stop через 30 с после UserPromptSubmit → нет completion; через 61 с → completion; StopFailure → completion failed; UserPromptSubmit при открытом диалоге → edit «устарело»; Post с ответом, не совпавшим с dialog.answers при source telegram → send ⚠; событие от неизвестной сессии → сессия создана.
 - [ ] **Step 2:** FAIL
 - [ ] **Step 3:** Реализовать
 - [ ] **Step 4:** PASS

@@ -88,6 +88,14 @@ function parseModel(text) {
   return null;
 }
 
+// Long reports keep both ends: the conclusion usually sits at the tail.
+function capInput(text) {
+  const cps = Array.from(text);
+  if (cps.length <= MAX_INPUT) return text;
+  const half = MAX_INPUT / 2;
+  return cps.slice(0, half).join('') + '\n…\n' + cps.slice(-half).join('');
+}
+
 export async function summarize(lastMessage, { failed = false, run = runClaude } = {}) {
   const text = String(lastMessage ?? '').trim();
   const nonEmpty = text.split(/\r?\n/).filter((l) => l.trim());
@@ -96,7 +104,7 @@ export async function summarize(lastMessage, { failed = false, run = runClaude }
     return { status, summary: text };
   }
   try {
-    const out = await run(Array.from(text).slice(0, MAX_INPUT).join(''));
+    const out = await run(capInput(text));
     const p = parseModel(out);
     if (p) return { status: failed ? 'error' : (p.status ?? 'done'), summary: p.summary };
   } catch { /* fall through */ }

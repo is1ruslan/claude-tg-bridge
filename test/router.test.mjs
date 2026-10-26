@@ -312,7 +312,9 @@ test('plan "Изменить план" → force-reply, then text → planSequen
   assert.equal(prompt.bind.prompt, true);
   assert.equal(h.store.pendingOther, d.id);
   const e2 = h.upd(h.text('добавь тесты', { replyTo: prompt.messageId }));
-  assert.deepEqual(injects(e2), [{ type: 'inject', sessionId: SID, steps: [{ text: '3' }, { text: 'добавь тесты' }, { sleep: 400 }, { key: 'ENTER' }] }]);
+  // F3: plan-feedback inject carries dialogId (no verify) so a failed inject reopens the dialog
+  assert.deepEqual(injects(e2), [{ type: 'inject', sessionId: SID, dialogId: d.id, steps: [{ text: '3' }, { text: 'добавь тесты' }, { sleep: 400 }, { key: 'ENTER' }] }]);
+  assert.equal(d.feedbackSent, true);
   assert.equal(ofType(e2, 'edit')[0].messageId, plan.messageId);
   assert.match(ofType(e2, 'edit')[0].text, /✔ выбрано: правки: добавь тесты/);
   assert.equal(d.status, 'injected');
@@ -335,7 +337,8 @@ test('perm "Да" → verify; perm "Нет" (last option) → no verify', () => 
   const d = lastDialog(h.store);
   assert.equal(d.options.length, 3);
   const yes = h.upd(h.cb(`p|${d.id}|1`));
-  assert.deepEqual(injects(yes)[0], { type: 'inject', sessionId: SID, steps: [{ text: '1' }], verify: { dialogId: d.id, timeoutMs: 10000 } });
+  // F7: a permission approve is verified for 2 min (the tool may still be running)
+  assert.deepEqual(injects(yes)[0], { type: 'inject', sessionId: SID, steps: [{ text: '1' }], verify: { dialogId: d.id, timeoutMs: 120000 } });
 
   const h2 = started();
   h2.hook('PermissionRequest-Write');
@@ -343,7 +346,9 @@ test('perm "Да" → verify; perm "Нет" (last option) → no verify', () => 
   const no = h2.upd(h2.cb(`p|${d2.id}|3`));
   assert.deepEqual(injects(no), [{ type: 'inject', sessionId: SID, steps: [{ text: '3' }] }]);
   assert.match(ofType(no, 'edit')[0].text, /✔ выбрано: ⛔ Нет/);
-  assert.equal(d2.status, 'injected');
+  // F2: "Нет" produces no hook event -> closed right away (never stuck in 'injected')
+  assert.equal(d2.status, 'closed');
+  assert.equal(d2.closedReason, 'telegram');
 });
 
 test('RF-3: text while perm dialog open → no inject, "ответьте кнопками"', () => {
@@ -500,4 +505,82 @@ test('non-text message → "Поддерживается только текст
   delete u.message.text;
   u.message.photo = [{ file_id: 'f' }];
   assert.deepEqual(h.upd(u).map(e => e.text), ['Поддерживается только текст']);
+});
+
+// ---------- final-fix wave ----------
+
+const types = (eff) => eff.map(e => e.type);
+const before = (eff, a, b) => eff.findIndex(e => e.type === a) < eff.findIndex(e => e.type === b);
+
+test('F3: dialog-resolving edits come BEFORE the inject (ask, multi submit, plan, perm, plan feedback)', () => {
+  const h = started();
+  h.hook('PreToolUse-Ask-single');
+  let d = lastDialog(h.store);
+  let eff = h.upd(h.cb(`a|${d.id}|0|1`));
+  assert.ok(before(eff, 'edit', 'inject'), types(eff).join());
+
+  const hm = started();
+  hm.hook('PreToolUse-Ask-multi');
+  d = lastDialog(hm.store);
+  hm.upd(hm.cb(`t|${d.id}|0|1`));
+  eff = hm.upd(hm.cb(`s|${d.id}|0`));
+  assert.ok(before(eff, 'edit', 'inject'), types(eff).join());
+
+  const hp = started();
+  hp.hook('PreToolUse-ExitPlanMode');
+  d = lastDialog(hp.store);
+  eff = hp.upd(hp.cb(`p|${d.id}|1`));
+  assert.ok(before(eff, 'edit', 'inject'), types(eff).join());
+
+  const hf = started();
+  hf.hook('PreToolUse-ExitPlanMode');
+  eff = hf.upd(hf.text('короче'));
+  assert.ok(before(eff, 'edit', 'inject'), types(eff).join());
+
+  for (const opt of [1, 3]) {
+    const hr = started();
+    hr.hook('PermissionRequest-Write');
+    d = lastDialog(hr.store);
+    eff = hr.upd(hr.cb(`p|${d.id}|${opt}`));
+    assert.ok(before(eff, 'edit', 'inject'), `perm ${opt}: ${types(eff).join()}`);
+  }
+});
+
+test('F7: verify timeouts — ask/plan 10 s, perm approve 120 s', () => {
+  const h = started();
+  h.hook('PreToolUse-Ask-single');
+  assert.equal(injects(h.upd(h.cb(`a|${lastDialog(h.store).id}|0|1`)))[0].verify.timeoutMs, 10000);
+  const hr = started();
+  hr.hook('PermissionRequest-Write');
+  assert.equal(injects(hr.upd(hr.cb(`p|${lastDialog(hr.store).id}|2`)))[0].verify.timeoutMs, 120000);
+});
+
+test('F2: /stop closes live dialogs of the session with stale edits, then injects ESC', () => {
+  const h = started();
+  const [ask] = h.hook('PreToolUse-Ask-single');
+  const d = lastDialog(h.store);
+  h.upd(h.cb(`o|${d.id}|0`)); // pendingOther set
+  const eff = h.upd(h.text('/stop'));
+  const [edit] = ofType(eff, 'edit');
+  assert.equal(edit.messageId, ask.messageId);
+  assert.equal(edit.keyboard, null);
+  assert.match(edit.text, /⌛ устарело$/);
+  assert.ok(before(eff, 'edit', 'inject'), types(eff).join());
+  assert.deepEqual(injects(eff), [{ type: 'inject', sessionId: SID, steps: [{ key: 'ESC' }] }]);
+  assert.equal(d.status, 'closed');
+  assert.equal(h.store.pendingOther, null);
+  // the old button is now dead
+  assert.equal(h.upd(h.cb(`a|${d.id}|0|1`))[0].text, 'Вопрос уже закрыт');
+});
+
+test('F2: a second stop for the same session within 3 s → «уже остановлено», no second ESC', () => {
+  const h = started();
+  assert.equal(injects(h.upd(h.text('/stop'), { now: T0 + 1000 })).length, 1);
+  const again = h.upd(h.text('/stop'), { now: T0 + 3000 });
+  assert.equal(injects(again).length, 0);
+  assert.deepEqual(again.map(e => e.text), ['уже остановлено']);
+  const cbAgain = h.upd(h.cb(`x|${SID.slice(0, 8)}`), { now: T0 + 3500 });
+  assert.deepEqual(cbAgain.map(e => [e.type, e.text]), [['answerCallback', 'уже остановлено']]);
+  // after 3 s a new stop goes through
+  assert.equal(injects(h.upd(h.text('/stop'), { now: T0 + 4001 })).length, 1);
 });

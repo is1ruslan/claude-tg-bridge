@@ -445,3 +445,37 @@ test('events of one session do not affect another session', () => {
   assert.deepEqual(h.run('UserPromptSubmit', { patch: { session_id: OTHER } }).length, 1);
   assert.equal(h.store.getDialog(send.bind.dialogId).status, 'open');
 });
+
+// ---------- final-fix wave ----------
+
+test('F1: claudePid/claudeStartedAt stored as session.pid/pidStartedAt; pid without startedAt resets it', () => {
+  const h = harness();
+  h.run('SessionStart', { claudePid: 4242, claudeStartedAt: 1_700_000_000_000, branch: 'main' });
+  const s = h.store.getSession(SID);
+  assert.equal(s.pid, 4242);
+  assert.equal(s.pidStartedAt, 1_700_000_000_000);
+  h.run('UserPromptSubmit', {}); // no claudePid -> untouched
+  assert.equal(s.pid, 4242);
+  assert.equal(s.pidStartedAt, 1_700_000_000_000);
+  h.run('UserPromptSubmit', { claudePid: 5555 }); // e.g. fallback findAncestor: creation time unknown
+  assert.equal(h.store.getSession(SID).pid, 5555);
+  assert.equal(h.store.getSession(SID).pidStartedAt, null);
+});
+
+test('F6: PostToolUse(ExitPlanMode) after plan feedback was sent from Telegram -> ⚠ approved instead of edits', () => {
+  const h = started();
+  h.run('PreToolUse-ExitPlanMode');
+  const d = dialogs(h.store).at(-1);
+  d.status = 'injected'; d.source = 'telegram'; d.feedbackSent = true; // as router marks it
+  const eff = h.run('PostToolUse-ExitPlanMode');
+  const warn = eff.filter((e) => e.type === 'send');
+  assert.equal(warn.length, 1);
+  assert.match(warn[0].text, /⚠ план был одобрен вместо отправки правок — проверьте терминал/);
+  assert.equal(d.status, 'closed');
+  // a normal Telegram approval (no feedback) stays silent
+  const h2 = started();
+  h2.run('PreToolUse-ExitPlanMode');
+  const d2 = dialogs(h2.store).at(-1);
+  d2.status = 'injected'; d2.source = 'telegram';
+  assert.deepEqual(h2.run('PostToolUse-ExitPlanMode'), []);
+});

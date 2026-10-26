@@ -87,14 +87,29 @@ export class Store {
     return found;
   }
 
-  closeDialog(id, reason) {
+  // Closing drops the heavy payload (tool_input); only text/messageIds stay for late edits.
+  closeDialog(id, reason, at = Date.now()) {
     const d = this.dialogs.get(id);
     if (!d) return null;
     if (d.status === 'closed') return d;
     d.status = 'closed';
     d.closedReason = reason;
+    d.closedAt = at;
+    d.payload = null;
     if (this.pendingOther === id) this.pendingOther = null;
     return d;
+  }
+
+  // Drops dialogs of removed sessions and closed dialogs older than maxAgeMs (by closedAt,
+  // falling back to createdAt for snapshots written before closedAt existed).
+  pruneDialogs(now = Date.now(), maxAgeMs = 3_600_000) {
+    for (const d of [...this.dialogs.values()]) {
+      const orphan = !this.sessions.has(d.sessionId);
+      const expired = d.status === 'closed' && now - (d.closedAt ?? d.createdAt ?? 0) > maxAgeMs;
+      if (!orphan && !expired) continue;
+      this.dialogs.delete(d.id);
+      if (this.pendingOther === d.id) this.pendingOther = null;
+    }
   }
 
   closeOpenDialogsOf(sessionId, reason) {

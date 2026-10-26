@@ -108,19 +108,19 @@ function openWithMessage(store, sid, now, { kind, toolUseId, toolName, input, op
 
 function bookkeeping(store, sid, ev, payload, now) {
   const prev = store.getSession(sid);
+  // A new pid always comes with its creation time (null = unknown, e.g. the findAncestor fallback).
+  const hasPid = ev.claudePid != null;
+  const pidStartedAt = hasPid ? (ev.claudeStartedAt ?? null) : undefined;
   if (!prev) {
     const cwd = payload.cwd ?? '';
     return store.upsertSession({
       id: sid, cwd, project: projectName(cwd),
-      branch: ev.branch ?? '—', pid: ev.claudePid ?? null, lastActivityAt: now,
+      branch: ev.branch ?? '—', pid: ev.claudePid ?? null, pidStartedAt: pidStartedAt ?? null, lastActivityAt: now,
     });
   }
-  return store.upsertSession({
-    id: sid,
-    pid: ev.claudePid ?? undefined,
-    branch: ev.branch ?? undefined,
-    lastActivityAt: now,
-  });
+  const upd = { id: sid, pid: ev.claudePid ?? undefined, branch: ev.branch ?? undefined, lastActivityAt: now };
+  if (hasPid) upd.pidStartedAt = pidStartedAt;
+  return store.upsertSession(upd);
 }
 
 export function handleHookEvent(store, ev, now) {
@@ -194,10 +194,22 @@ export function handleHookEvent(store, ev, now) {
       const d = DIALOG_TOOLS.has(tool)
         ? store.findDialogForTool(sid, tool, payload.tool_use_id)
         : permDialogForTool(store, sid, tool);
-      if (!d || !isLive(d)) return [];
+      // F6: plan edits were typed from Telegram, yet the plan got approved.
+      const approvedInstead = [];
+      if (d && d.kind === 'plan' && d.feedbackSent && !d.feedbackWarned) {
+        d.feedbackWarned = true;
+        approvedInstead.push({
+          type: 'send',
+          text: `${header(label())}\n⚠ план был одобрен вместо отправки правок — проверьте терминал`,
+          bind: { sessionId: sid },
+        });
+      }
+      if (!d || !isLive(d)) return approvedInstead;
       if (d.source === 'telegram') {
+        // mismatch check needs the payload, which closeDialog drops
+        const out = d.kind === 'ask' ? mismatchEffects(store, d, payload) : approvedInstead;
         store.closeDialog(d.id, 'telegram');
-        return d.kind === 'ask' ? mismatchEffects(store, d, payload) : [];
+        return out;
       }
       store.closeDialog(d.id, 'terminal');
       return resolutionEffects(d, 'terminal');

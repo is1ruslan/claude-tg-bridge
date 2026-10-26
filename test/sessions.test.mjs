@@ -199,3 +199,37 @@ test('closeDialog keeps first closedReason; upsert ignores undefined', () => {
   assert.equal(s.getSession('s1').branch, 'main');
   assert.equal(s.getSession('s1').state, 'working');
 });
+
+// ---------- F9: bounded store ----------
+
+test('F9: closeDialog drops payload (ask, perm, plan) and sets closedAt', () => {
+  const st = new Store();
+  st.upsertSession({ id: 'sess-1', lastActivityAt: 1 });
+  for (const kind of ['ask', 'perm', 'plan']) {
+    const d = st.openDialog({ sessionId: 'sess-1', kind, payload: { big: 'x'.repeat(1000) } });
+    st.closeDialog(d.id, 'terminal', 12345);
+    assert.equal(d.payload, null, kind);
+    assert.equal(d.closedAt, 12345, kind);
+  }
+  const live = st.openDialog({ sessionId: 'sess-1', kind: 'ask', payload: { q: 1 } });
+  assert.deepEqual(live.payload, { q: 1 }, 'live ask keeps its payload');
+  assert.equal(live.closedAt ?? null, null);
+});
+
+test('F9: pruneDialogs drops closed dialogs older than 1 h and dialogs of removed sessions', () => {
+  const st = new Store();
+  const H = 3_600_000;
+  const now = 10 * H;
+  st.upsertSession({ id: 'sess-1', lastActivityAt: 1 });
+  st.upsertSession({ id: 'sess-2', lastActivityAt: 1 });
+  const old = st.openDialog({ sessionId: 'sess-1', kind: 'perm' }); st.closeDialog(old.id, 'terminal', now - H - 1);
+  const recent = st.openDialog({ sessionId: 'sess-1', kind: 'perm' }); st.closeDialog(recent.id, 'terminal', now - H + 1000);
+  const live = st.openDialog({ sessionId: 'sess-1', kind: 'ask' }); live.createdAt = 0;
+  const legacy = st.openDialog({ sessionId: 'sess-1', kind: 'ask' }); legacy.status = 'closed'; legacy.createdAt = now - 2 * H; // snapshot without closedAt
+  const orphan = st.openDialog({ sessionId: 'sess-2', kind: 'ask' });
+  st.pendingOther = orphan.id;
+  st.removeSession('sess-2');
+  st.pruneDialogs(now);
+  assert.deepEqual([...st.dialogs.keys()].sort(), [recent.id, live.id].sort());
+  assert.equal(st.pendingOther, null);
+});

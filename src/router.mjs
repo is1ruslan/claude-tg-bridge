@@ -6,6 +6,8 @@ import {
 
 const MAX_EDIT_TEXT = 3900;
 const VERIFY_MS = 10000;
+const PERM_VERIFY_MS = 120000; // F7: an approved tool may run for a while before PostToolUse
+const STOP_DEBOUNCE_MS = 3000; // a second ESC would open the rewind menu
 
 const HELP_TEXT = [
   'Команды:',
@@ -18,14 +20,14 @@ const HELP_TEXT = [
 ].join('\n');
 
 const isLive = d => !!d && (d.status === 'open' || d.status === 'injected');
-const verifyOf = d => ({ dialogId: d.id, timeoutMs: VERIFY_MS });
+const verifyOf = d => ({ dialogId: d.id, timeoutMs: d.kind === 'perm' ? PERM_VERIFY_MS : VERIFY_MS });
 const lastMessageId = d => d.messageIds[d.messageIds.length - 1];
 
-// Mark the dialog's last message as resolved from Telegram (keyboard removed).
-function resolvedEdit(dialog, chosen) {
+// Mark the dialog's last message as resolved (keyboard removed). kind: 'telegram' | 'stale'.
+function resolvedEdit(dialog, chosen, kind = 'telegram') {
   const messageId = lastMessageId(dialog);
   if (messageId == null) return [];
-  const suffix = resolvedSuffix('telegram', chosen);
+  const suffix = resolvedSuffix(kind, chosen);
   const text = dialog.text ?? '';
   if (text.length > MAX_EDIT_TEXT) {
     return [
@@ -66,21 +68,36 @@ function advance(store, dialog, chosenLabel) {
     dialog.answers.splice(dialog.cursor);
     return [{ type: 'send', text: '⚠ Не удалось собрать ответ — ответьте в терминале', bind: { sessionId: dialog.sessionId } }];
   }
-  const out = [{ type: 'inject', sessionId: dialog.sessionId, steps, verify: verifyOf(dialog) }, ...resolvedEdit(dialog, chosenLabel)];
+  // F3: edits first, inject last — the executor's failure handling (keyboard restore) must run after them.
+  const out = [...resolvedEdit(dialog, chosenLabel), { type: 'inject', sessionId: dialog.sessionId, steps, verify: verifyOf(dialog) }];
   markInjected(store, dialog);
   return out;
 }
 
-const stopEffects = (store, session) => [
-  { type: 'inject', sessionId: session.id, steps: stopSequence() },
-  { type: 'send', text: '⏹ Остановлено: ' + esc(store.labelOf(session.id)), bind: { sessionId: session.id } },
-];
+// F2: ESC closes whatever the terminal shows, so live dialogs of the session go stale first.
+// Returns null for a repeated stop within STOP_DEBOUNCE_MS (a 2nd ESC opens the rewind menu).
+function stopEffects(store, session, now) {
+  if (Number.isFinite(now) && session.lastStopAt != null && now - session.lastStopAt < STOP_DEBOUNCE_MS) return null;
+  if (Number.isFinite(now)) session.lastStopAt = now;
+  const out = [];
+  for (const d of [...store.dialogs.values()]) {
+    if (d.sessionId !== session.id || !isLive(d)) continue;
+    out.push(...resolvedEdit(d, undefined, 'stale'));
+    store.closeDialog(d.id, 'stale');
+  }
+  out.push(
+    { type: 'inject', sessionId: session.id, steps: stopSequence() },
+    { type: 'send', text: '⏹ Остановлено: ' + esc(store.labelOf(session.id)), bind: { sessionId: session.id } },
+  );
+  return out;
+}
+const ALREADY_STOPPED = 'уже остановлено';
 
 const pickItems = store => store.liveSessions().map(s => ({ label: store.labelOf(s.id), short: s.short }));
 
 // ---------- callbacks ----------
 
-function handleCallback(store, cq) {
+function handleCallback(store, cq, now) {
   const ack = (text) => (text ? { type: 'answerCallback', callbackId: cq.id, text } : { type: 'answerCallback', callbackId: cq.id });
   const parts = String(cq.data ?? '').split('|');
   const [kind] = parts;
@@ -88,7 +105,8 @@ function handleCallback(store, cq) {
   if (kind === 'x') {
     const s = store.sessionByShort(parts[1]);
     if (!s) return [ack('Сессия завершена')];
-    return [ack(), ...stopEffects(store, s)];
+    const stop = stopEffects(store, s, now);
+    return stop ? [ack(), ...stop] : [ack(ALREADY_STOPPED)];
   }
 
   if (kind === 'r') {
@@ -123,11 +141,15 @@ function handleCallback(store, cq) {
     const inj = d.kind === 'plan'
       ? { type: 'inject', sessionId: d.sessionId, steps: planSequence(k), verify: verifyOf(d) }
       : { type: 'inject', sessionId: d.sessionId, steps: permissionSequence(k) };
-    // The last perm option is "No": it produces no PostToolUse, so nothing to verify.
-    if (d.kind === 'perm' && k < d.options.length - 1) inj.verify = verifyOf(d);
     const edit = resolvedEdit(d, d.options[k]);
-    markInjected(store, d);
-    return [ack(), inj, ...edit];
+    if (d.kind === 'perm' && k === d.options.length - 1) {
+      // F2: "No" produces no hook event at all -> close now instead of leaving it 'injected'.
+      store.closeDialog(d.id, 'telegram');
+    } else {
+      if (d.kind === 'perm') inj.verify = verifyOf(d);
+      markInjected(store, d);
+    }
+    return [ack(), ...edit, inj];
   }
 
   // ask callbacks: a|dlg|q|opt, t|dlg|q|opt, s|dlg|q, o|dlg|q
@@ -192,7 +214,9 @@ function deliver(store, session, text, { boundDialogId, replyTo } = {}) {
     if (d.kind === 'plan') {
       const edit = resolvedEdit(d, 'правки: ' + text);
       markInjected(store, d);
-      return [{ type: 'inject', sessionId: session.id, steps: planSequence(PLAN_FEEDBACK_INDEX, text) }, ...edit];
+      d.feedbackSent = true; // F6: a later PostToolUse(ExitPlanMode) means the plan got approved instead
+      // F3: no verify (rejection emits no event), but dialogId lets a failed inject reopen the dialog.
+      return [...edit, { type: 'inject', sessionId: session.id, dialogId: d.id, steps: planSequence(PLAN_FEEDBACK_INDEX, text) }];
     }
     // perm (RF-3): never type free text into a permission prompt.
     return [{ type: 'send', text: '🔐 В сессии открыт запрос разрешения — ответьте кнопками', bind }];
@@ -210,7 +234,7 @@ function handleCommand(store, cmd, now) {
   }
   if (cmd === '/stop') {
     if (!live.length) return [{ type: 'send', text: 'Нет активных сессий' }];
-    if (live.length === 1) return stopEffects(store, live[0]);
+    if (live.length === 1) return stopEffects(store, live[0], now) ?? [{ type: 'send', text: ALREADY_STOPPED }];
     return [{ type: 'send', text: 'Какую сессию остановить?', keyboard: sessionPickKeyboard(pickItems(store), 'x') }];
   }
   return [{ type: 'send', text: HELP_TEXT }]; // /help, /start
@@ -261,7 +285,7 @@ export function handleUpdate(store, update, { userId, now } = {}) {
   if (cq) {
     // RF-1: allowlist before anything else.
     if (cq.from?.id !== userId || cq.message?.chat?.type !== 'private') return [];
-    return handleCallback(store, cq);
+    return handleCallback(store, cq, now);
   }
   const msg = update.message;
   if (msg) {

@@ -14,7 +14,7 @@ import { Store } from './sessions.mjs';
 import { handleHookEvent } from './events.mjs';
 import { handleUpdate } from './router.mjs';
 import { summarize as summarizeDefault, resolveClaude } from './summary.mjs';
-import { completionText, header, esc } from './format.mjs';
+import { completionText, header, esc, dialogKeyboard } from './format.mjs';
 import { restrictToUser as restrictDefault } from './acl.mjs';
 
 export const EXIT_PORT_IN_USE = 1;
@@ -26,6 +26,9 @@ const MAX_BODY = 2 * 1024 * 1024;
 const BACKOFF_CAP_MS = 30_000;
 const PROCS_CACHE_MS = 2000;
 const BRANCH_EVENTS = new Set(['SessionStart', 'UserPromptSubmit']);
+const ANCESTOR_RETRY_MS = 60_000;
+const MAX_EDIT_TEXT = 3900;
+const RETRY_NOTE = '⚠ не удалось ввести — выберите снова';
 
 const errText = (e) => String(e?.message ?? e);
 
@@ -116,15 +119,26 @@ export async function startDaemon({
     chain = chain.then(fn).catch((e) => log.error(`${name} failed`, { error: errText(e) })).then(scheduleSnapshot);
     return chain;
   }
+  // Work running outside the serial queue (summaries); idle() waits for it too.
+  const background = new Set();
+  function inBackground(p) {
+    background.add(p);
+    p.finally(() => background.delete(p));
+  }
   async function idle() {
     let c;
-    do { c = chain; await c; } while (c !== chain);
+    do {
+      c = chain;
+      await c;
+      while (background.size) await Promise.allSettled([...background]);
+    } while (c !== chain || background.size);
   }
 
   // ---------- process helpers ----------
   // listProcs() resolves an empty Map when PowerShell fails/times out: that means "unknown",
   // never "everything is dead" — it is not cached and callers must not act on it.
   let procCache = null;
+  const ancestorMiss = new Map(); // sessionId -> time of the last fruitless findAncestor
   const cachedList = async () => {
     if (procCache && Date.now() - procCache.at <= PROCS_CACHE_MS) return procCache.map;
     const map = await procs.listProcs();
@@ -132,18 +146,30 @@ export async function startDaemon({
     procCache = { at: Date.now(), map };
     return map;
   };
-  // -> 'alive' | 'dead' | 'unknown'
-  async function aliveState(pid) {
-    if (!procs.listProcs) return (await procs.isClaudeAlive(pid)) ? 'alive' : 'dead';
+  // -> 'alive' | 'dead' | 'unknown'. startedAt (Unix ms, optional) guards against a reused pid.
+  async function aliveState(pid, startedAt) {
+    const opts = Number.isFinite(startedAt) ? { startedAt } : {};
+    if (!procs.listProcs) return (await procs.isClaudeAlive(pid, opts)) ? 'alive' : 'dead';
     const map = await cachedList();
     if (!map) return 'unknown';
-    return (await procs.isClaudeAlive(pid, { listProcs: async () => map })) ? 'alive' : 'dead';
+    return (await procs.isClaudeAlive(pid, { ...opts, listProcs: async () => map })) ? 'alive' : 'dead';
   }
 
-  // A failed/dropped inject leaves the dialog answerable again from Telegram.
-  function reopenDialog(e) {
-    const d = e.verify?.dialogId ? store.getDialog(e.verify.dialogId) : null;
-    if (d && d.status === 'injected') { d.status = 'open'; d.source = null; }
+  // F3: a failed/dropped inject leaves the dialog answerable again from Telegram: reopen it and
+  // put its keyboard back on the last message (the router already removed it).
+  async function reopenDialog(e) {
+    const id = e.verify?.dialogId ?? e.dialogId;
+    const d = id ? store.getDialog(id) : null;
+    if (!d || d.status !== 'injected') return;
+    d.status = 'open';
+    d.source = null;
+    d.feedbackSent = false;
+    if (d.kind === 'ask') d.answers.length = d.cursor; // re-ask the current question
+    const messageId = d.messageIds[d.messageIds.length - 1];
+    const keyboard = dialogKeyboard(d);
+    if (messageId == null || !keyboard) return;
+    const text = `${d.text ?? ''}\n\n${RETRY_NOTE}`;
+    await runEffect({ type: 'edit', messageId, text: text.length > MAX_EDIT_TEXT ? null : text, keyboard });
   }
 
   // ---------- effect executor ----------
@@ -167,10 +193,10 @@ export async function startDaemon({
   async function doInject(e) {
     const session = store.getSession(e.sessionId);
     const pid = session?.pid;
-    const state = !session || pid == null ? 'dead' : await aliveState(pid);
+    const state = !session || pid == null ? 'dead' : await aliveState(pid, session.pidStartedAt);
     if (state === 'unknown') {
       log.warn('inject dropped: process list unavailable', { session: session.short, pid });
-      reopenDialog(e);
+      await reopenDialog(e);
       await send({
         text: `${header(labelOf(e.sessionId))}
 ⚠ не удалось проверить процесс сессии, ответьте в терминале`,
@@ -180,14 +206,14 @@ export async function startDaemon({
     }
     if (state === 'dead') {
       log.warn('inject dropped: session process not alive', { session: String(e.sessionId).slice(0, 8), pid });
-      reopenDialog(e);
+      await reopenDialog(e);
       await send({ text: 'Сессия завершена: ' + esc(labelOf(e.sessionId)), bind: session ? { sessionId: e.sessionId } : undefined });
       return;
     }
     const r = await inject.injectSteps(pid, e.steps);
     if (!r?.ok) {
       log.warn('inject failed', { session: session.short, error: r?.error });
-      reopenDialog(e);
+      await reopenDialog(e);
       await send({
         text: `${header(labelOf(e.sessionId))}\n⚠ не удалось ввести в терминал: ${esc(r?.error ?? 'неизвестная ошибка')}`,
         bind: { sessionId: e.sessionId },
@@ -199,9 +225,14 @@ export async function startDaemon({
       const label = labelOf(e.sessionId);
       later(verifyTimeoutMs ?? e.verify.timeoutMs ?? 10_000, () => enqueue('verify', async () => {
         const d = store.getDialog(dialogId);
-        if (!d || d.status === 'closed') return;
+        if (!d || d.status !== 'injected') return;
+        // F2: unconfirmed -> close (source telegram) so the session's instructions are not blocked.
+        store.closeDialog(dialogId, 'telegram');
+        const warn = d.kind === 'perm'
+          ? '⚠ ответ на разрешение не подтверждён за 2 мин — проверьте терминал'
+          : '⚠ не удалось подтвердить ответ — проверьте терминал';
         await send({
-          text: `${header(labelOf(e.sessionId) || label)}\n⚠ не удалось подтвердить ответ — проверьте терминал`,
+          text: `${header(labelOf(e.sessionId) || label)}\n${warn}`,
           bind: store.getSession(e.sessionId) ? { sessionId: e.sessionId } : undefined,
         });
       }));
@@ -218,11 +249,14 @@ export async function startDaemon({
       case 'answerCallback': await telegram.answerCallback(e.callbackId, e.text); return;
       case 'inject': await doInject(e); return;
       case 'completion': {
-        const r = (await summarize(e.lastMessage, { failed: e.failed })) ?? {};
-        await send({
-          text: completionText(labelOf(e.sessionId), r.status, r.summary || '(пустой ответ)'),
-          bind: { sessionId: e.sessionId },
-        });
+        // F4: summarize (claude -p, up to a minute) runs outside the serial queue; only the send is queued.
+        inBackground(Promise.resolve()
+          .then(() => summarize(e.lastMessage, { failed: e.failed }))
+          .catch((err) => { log.error('summarize failed', { error: errText(err) }); return { status: e.failed ? 'error' : 'done' }; })
+          .then((r) => enqueue('completion', () => send({
+            text: completionText(labelOf(e.sessionId), r?.status, r?.summary || '(пустой ответ)'),
+            bind: { sessionId: e.sessionId },
+          }))));
         return;
       }
       default: log.warn('unknown effect', { type: e.type });
@@ -241,20 +275,33 @@ export async function startDaemon({
     const payload = body?.payload;
     const sid = payload?.session_id;
     if (!sid || typeof payload !== 'object') { log.warn('hook event without session_id', { event }); return; }
+    // F1: the hook resolves claude.exe synchronously (body.claudePid); findAncestor(ppid) is only a
+    // fallback, at most once per session per 60 s (by then the hook's parent chain may be gone).
     let claudePid;
-    if (store.getSession(sid)?.pid == null && Number.isInteger(body.ppid)) {
-      claudePid = (await procs.findAncestor(body.ppid)) ?? undefined;
+    let claudeStartedAt;
+    if (Number.isInteger(body.claudePid) && body.claudePid > 0) {
+      claudePid = body.claudePid;
+      if (Number.isFinite(body.claudeStartedAt) && body.claudeStartedAt > 0) claudeStartedAt = body.claudeStartedAt;
+      ancestorMiss.delete(sid);
+    } else if (store.getSession(sid)?.pid == null && Number.isInteger(body.ppid)) {
+      const last = ancestorMiss.get(sid);
+      if (last == null || now() - last >= ANCESTOR_RETRY_MS) {
+        claudePid = (await procs.findAncestor(body.ppid)) ?? undefined;
+        if (claudePid == null) ancestorMiss.set(sid, now());
+        else ancestorMiss.delete(sid);
+      }
     }
     let branch;
     if (BRANCH_EVENTS.has(event) && payload.cwd) branch = await procs.gitBranch(payload.cwd);
-    await runEffects(handleHookEvent(store, { event, payload, claudePid, branch }, now()));
+    await runEffects(handleHookEvent(store, { event, payload, claudePid, claudeStartedAt, branch }, now()));
+    if (event === 'SessionEnd') ancestorMiss.delete(sid);
   }
 
   // ---------- pruning dead sessions ----------
   async function pruneDead() {
     for (const s of [...store.sessions.values()]) {
       if (s.pid == null) continue;
-      const state = await aliveState(s.pid);
+      const state = await aliveState(s.pid, s.pidStartedAt);
       if (state === 'unknown') { log.warn('process list unavailable, prune skipped'); return; }
       if (state === 'alive') continue;
       log.info('session process gone, removing', { session: s.short, pid: s.pid });
@@ -388,7 +435,12 @@ export async function startDaemon({
     .then(() => claudeVersion())
     .then((v) => log.info(`Claude Code version: ${v}`), (e) => log.warn('claude --version failed', { error: errText(e) }));
 
-  const pruneTimer = setInterval(() => enqueue('prune', pruneDead), pruneIntervalMs);
+  // F9: the periodic pass also bounds the store (old closed dialogs, dialogs of removed sessions).
+  const pruneTimer = setInterval(() => enqueue('prune', async () => {
+    await pruneDead();
+    store.pruneDialogs(now());
+    for (const sid of ancestorMiss.keys()) if (!store.getSession(sid)) ancestorMiss.delete(sid);
+  }), pruneIntervalMs);
   pruneTimer.unref?.();
 
   pollLoop().catch((e) => log.error('poll loop crashed', { error: errText(e) }));
@@ -431,13 +483,21 @@ async function main(log, secrets) {
   process.on('SIGTERM', stop);
 }
 
+// An uncaught exception leaves the daemon in an unknown state: log it and exit with EXIT_CRASH so the
+// supervisor restarts it. Unhandled rejections are only logged.
+export function installProcessHandlers(proc, log, exit = (code) => process.exit(code)) {
+  proc.on('unhandledRejection', (e) => log.error('unhandledRejection', { error: String(e?.stack ?? e) }));
+  proc.on('uncaughtException', (e) => {
+    try { log.error('uncaughtException', { error: String(e?.stack ?? e) }); } finally { exit(EXIT_CRASH); }
+  });
+}
+
 const isMain = process.argv[1] && path.resolve(process.argv[1]).toLowerCase() === fileURLToPath(import.meta.url).toLowerCase();
 if (isMain) {
   const secrets = []; // filled in main(); maskSecrets reads it at write time
   let log = { info() {}, warn() {}, error() {} };
   try { log = createLogger({ dir: getPaths().logsDir, secrets }); } catch { /* keep no-op */ }
-  process.on('unhandledRejection', (e) => log.error('unhandledRejection', { error: String(e?.stack ?? e) }));
-  process.on('uncaughtException', (e) => log.error('uncaughtException', { error: String(e?.stack ?? e) }));
+  installProcessHandlers(process, log);
   main(log, secrets).catch((e) => {
     log.error('daemon crashed during startup', { error: String(e?.stack ?? e) });
     process.exit(EXIT_CRASH);

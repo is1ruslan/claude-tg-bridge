@@ -540,3 +540,202 @@ test('restrictToUser runs icacls with inheritance removed and logs errors withou
   await restrictToUser('p', { user: 'bob', log, execFile: (c, a, o, cb) => cb(new Error('denied')) });
   assert.ok(log.lines.some((l) => l.level === 'error'));
 });
+
+// ---------- final-fix wave ----------
+
+test('F1: body.claudePid/claudeStartedAt -> session pid set without findAncestor', async () => {
+  const s = await setup();
+  try {
+    const payload = fx('SessionStart');
+    await s.post({ event: 'SessionStart', payload, ppid: 999, claudePid: 31337, claudeStartedAt: 1_700_000_000_000 });
+    await waitFor(() => s.d.store.getSession(SID));
+    await s.d.idle();
+    assert.equal(s.d.store.getSession(SID).pid, 31337);
+    assert.equal(s.d.store.getSession(SID).pidStartedAt, 1_700_000_000_000);
+    assert.deepEqual(s.procs.ancestorCalls, []);
+    // a later body pid wins over the stored one (e.g. resumed in another claude.exe)
+    await s.post({ event: 'UserPromptSubmit', payload: fx('UserPromptSubmit'), ppid: 999, claudePid: 4040 });
+    await waitFor(() => s.d.store.getSession(SID).pid === 4040);
+    assert.equal(s.d.store.getSession(SID).pidStartedAt, null);
+    assert.deepEqual(s.procs.ancestorCalls, []);
+  } finally { await s.d.close(); }
+});
+
+test('F1: findAncestor fallback is negative-cached per session for 60 s', async () => {
+  let t = 1_000_000;
+  const procs = fakeProcs();
+  procs.findAncestor = async (ppid) => { procs.ancestorCalls.push(ppid); return null; };
+  const s = await setup({ procs, extra: { now: () => t } });
+  try {
+    await s.hook('SessionStart');
+    await s.hook('UserPromptSubmit');
+    t += 59_000;
+    await s.hook('UserPromptSubmit');
+    await s.d.idle();
+    assert.equal(procs.ancestorCalls.length, 1);
+    t += 1_000;
+    await s.hook('UserPromptSubmit');
+    await s.d.idle();
+    assert.equal(procs.ancestorCalls.length, 2);
+    assert.equal(s.d.store.getSession(SID).pid, null);
+  } finally { await s.d.close(); }
+});
+
+test('F1b: inject refuses a pid whose creation time does not match (reused pid)', async () => {
+  const procs = fakeProcs();
+  procs.listProcs = async () => new Map([[31337, { name: 'claude.exe', ppid: 1, startedAt: 1_700_000_009_000 }]]);
+  procs.isClaudeAlive = realIsClaudeAlive;
+  const s = await setup({ procs });
+  try {
+    await s.post({ event: 'SessionStart', payload: fx('SessionStart'), ppid: 999, claudePid: 31337, claudeStartedAt: 1_700_000_000_000 });
+    await waitFor(() => s.d.store.getSession(SID));
+    s.telegram.push(msg('сделай'));
+    await waitFor(() => s.telegram.sent.length >= 1);
+    await s.d.idle();
+    assert.equal(s.inject.calls.length, 0);
+    assert.equal(s.d.store.sessions.size, 0, 'pruned as dead');
+  } finally { await s.d.close(); }
+});
+
+test('F2: verify timeout closes the dialog (telegram) + ⚠; instructions are not blocked afterwards', async () => {
+  const s = await setup({ extra: { verifyTimeoutMs: 100 } });
+  try {
+    await s.hook('SessionStart');
+    await s.hook('PreToolUse-Ask-single');
+    await waitFor(() => s.telegram.sent.length === 1);
+    const dlg = dlgOf(s.telegram.sent[0]);
+    s.telegram.push(cb(`a|${dlg}|0|1`));
+    await waitFor(() => s.telegram.sent.some((m) => m.text.includes('⚠ не удалось подтвердить ответ — проверьте терминал')));
+    await s.d.idle();
+    assert.equal(s.d.store.getDialog(dlg).status, 'closed');
+    assert.equal(s.d.store.getDialog(dlg).closedReason, 'telegram');
+    s.telegram.push(msg('следующая задача'));
+    await waitFor(() => s.inject.calls.length === 2);
+    assert.deepEqual(s.inject.calls[1].steps[0], { text: 'следующая задача' });
+    assert.ok(!s.telegram.sent.some((m) => m.text.includes('обрабатывается')));
+  } finally { await s.d.close(); }
+});
+
+test('F7: permission approve unconfirmed -> 2-min ⚠ text', async () => {
+  const s = await setup({ extra: { verifyTimeoutMs: 100 } });
+  try {
+    await s.hook('SessionStart');
+    await s.hook('PermissionRequest-Write');
+    await waitFor(() => s.telegram.sent.length === 1);
+    s.telegram.push(cb(`p|${dlgOf(s.telegram.sent[0])}|1`));
+    await waitFor(() => s.telegram.sent.some((m) => m.text.includes('⚠ ответ на разрешение не подтверждён за 2 мин — проверьте терминал')));
+    assert.ok(!s.telegram.sent.some((m) => m.text.includes('не удалось подтвердить ответ')));
+  } finally { await s.d.close(); }
+});
+
+const RETRY = '⚠ не удалось ввести — выберите снова';
+
+test('F3: failed inject -> final edit restores the keyboard; pressing again injects again', async () => {
+  const s = await setup({ inject: fakeInject({ ok: false, error: 'boom' }) });
+  try {
+    await s.hook('SessionStart');
+    await s.hook('PreToolUse-Ask-single');
+    await waitFor(() => s.telegram.sent.length === 1);
+    const askMsg = s.telegram.sent[0];
+    const dlg = dlgOf(askMsg);
+    s.telegram.push(cb(`a|${dlg}|0|1`));
+    await waitFor(() => s.telegram.edits.length === 2);
+    await s.d.idle();
+    const [resolved, restored] = s.telegram.edits;
+    assert.equal(resolved.keyboard, null);
+    assert.equal(restored.messageId, askMsg.id);
+    assert.deepEqual(restored.keyboard, askMsg.keyboard);
+    assert.ok(restored.text.endsWith(`\n\n${RETRY}`));
+    assert.ok(!restored.text.includes('✔ выбрано'));
+    const d = s.d.store.getDialog(dlg);
+    assert.equal(d.status, 'open');
+    assert.deepEqual(d.answers, [], 'current question is re-asked');
+    s.telegram.push(cb(`a|${dlg}|0|2`, 'cbRetry'));
+    await waitFor(() => s.inject.calls.length === 2);
+    assert.deepEqual(s.inject.calls[1].steps, [{ text: '2' }]);
+  } finally { await s.d.close(); }
+});
+
+test('F3: dead session on a plan-feedback inject also reopens + restores the keyboard', async () => {
+  let n = 0;
+  const s = await setup({ procs: fakeProcs({ alive: () => n++ === 0 }) }); // alive for prune, dead at inject
+  try {
+    await s.hook('SessionStart');
+    await s.hook('PreToolUse-ExitPlanMode');
+    await waitFor(() => s.telegram.sent.length === 1);
+    const planMsg = s.telegram.sent[0];
+    const dlg = dlgOf(planMsg);
+    s.telegram.push(msg('поправь шаг 2'));
+    await waitFor(() => s.telegram.edits.length === 2);
+    await s.d.idle();
+    const restored = s.telegram.edits[1];
+    assert.deepEqual(restored.keyboard, planMsg.keyboard);
+    assert.ok(restored.text.endsWith(RETRY));
+    const d = s.d.store.getDialog(dlg);
+    assert.equal(d.status, 'open');
+    assert.equal(d.feedbackSent, false);
+    assert.equal(s.inject.calls.length, 0);
+  } finally { await s.d.close(); }
+});
+
+test('F3: unknown process list on an ask inject reopens + restores the keyboard', async () => {
+  const procs = unknownProcs();
+  const s = await setup({ procs });
+  try {
+    await s.hook('SessionStart');
+    await s.hook('PreToolUse-Ask-single');
+    await waitFor(() => s.telegram.sent.length === 1);
+    const askMsg = s.telegram.sent[0];
+    s.telegram.push(cb(`a|${dlgOf(askMsg)}|0|1`));
+    await waitFor(() => s.telegram.edits.length === 2);
+    assert.deepEqual(s.telegram.edits[1].keyboard, askMsg.keyboard);
+  } finally { await s.d.close(); }
+});
+
+test('F4: a slow summarize does not delay the effects of a subsequent update', async () => {
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const s = await setup({ summarize: async (t) => { await gate; return { status: 'done', summary: t }; } });
+  try {
+    await s.hook('SessionStart');
+    await s.post({ event: 'StopFailure', payload: { session_id: SID, cwd: 'C:/Projects/tg-spike', error: 'oops' }, ppid: 999 });
+    s.telegram.push(msg('/status'));
+    await waitFor(() => s.telegram.sent.length === 1);
+    assert.match(s.telegram.sent[0].text, /tg-spike/);
+    release();
+    await waitFor(() => s.telegram.sent.length === 2);
+    assert.match(s.telegram.sent[1].text, /Статус: ✅ завершено\noops$/);
+    await s.d.idle();
+    assert.deepEqual(s.d.store.lookupMessage(s.telegram.sent[1].id), { sessionId: SID });
+  } finally { await s.d.close(); }
+});
+
+test('F9: periodic prune drops closed dialogs older than 1 h; closed dialogs lose their payload', async () => {
+  const t = Date.now();
+  const s = await setup({ extra: { now: () => t, pruneIntervalMs: 30 } });
+  try {
+    await s.hook('SessionStart');
+    await s.hook('PermissionRequest-Write');
+    await waitFor(() => s.telegram.sent.length === 1);
+    const dlg = dlgOf(s.telegram.sent[0]);
+    await s.hook('PostToolUse-Write'); // answered in the terminal
+    await waitFor(() => s.d.store.getDialog(dlg)?.status === 'closed');
+    assert.equal(s.d.store.getDialog(dlg).payload, null);
+    s.d.store.getDialog(dlg).closedAt = t - 3_600_001;
+    await waitFor(() => !s.d.store.getDialog(dlg));
+    assert.equal(s.d.store.sessions.size, 1);
+  } finally { await s.d.close(); }
+});
+
+test('minor: uncaughtException -> logged + exit(EXIT_CRASH)', async () => {
+  const { installProcessHandlers, EXIT_CRASH } = await import('../src/daemon.mjs');
+  const proc = new EventEmitter();
+  const log = recLog();
+  const codes = [];
+  installProcessHandlers(proc, log, (c) => codes.push(c));
+  proc.emit('unhandledRejection', new Error('rej'));
+  assert.deepEqual(codes, []);
+  proc.emit('uncaughtException', new Error('kaboom'));
+  assert.deepEqual(codes, [EXIT_CRASH]);
+  assert.ok(log.lines.some((l) => l.level === 'error' && /kaboom/.test(JSON.stringify(l))));
+});

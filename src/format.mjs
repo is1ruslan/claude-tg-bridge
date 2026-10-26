@@ -2,7 +2,7 @@
 
 export const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
-export const header = (label) => `📁 <b>${esc(label)}</b>`;
+export const header = (label) => `📁 <b>${esc(label || 'сессия')}</b>`;
 
 const STATUS = { done: '✅ завершено', waiting: '⏸ ждёт решения', error: '❌ ошибка' };
 
@@ -40,18 +40,58 @@ export function planText(label, plan) {
   return `${header(label)}\n📝 План на подтверждение\n${esc(plan)}`;
 }
 
+// Cut to at most `max` UTF-16 units without splitting a surrogate pair.
+function cutSafe(s, max) {
+  if (s.length <= max) return s;
+  let head = s.slice(0, max);
+  const last = head.charCodeAt(head.length - 1);
+  if (last >= 0xd800 && last <= 0xdbff) head = head.slice(0, -1);
+  return head;
+}
+
+// <pre> block, plus a ⚠ note line when the text had to be cut.
+function preBlock(text, max, what = 'обрезано') {
+  const s = String(text ?? '');
+  const head = cutSafe(s, max);
+  const pre = `<pre>${esc(head)}</pre>`;
+  return head.length === s.length ? pre : `${pre}\n⚠ ${what} (всего ${s.length} символов) — полностью в терминале`;
+}
+
+const BASH_MAX = 3500;
+const EDIT_MAX = 800;
+const WRITE_MAX = 1200;
+const OTHER_MAX = 1500;
+
 export function permText(label, toolName, toolInput) {
   const inp = toolInput ?? {};
-  let body;
-  if (toolName === 'Bash' && typeof inp.command === 'string') body = inp.command;
-  else if ((toolName === 'Edit' || toolName === 'Write') && typeof inp.file_path === 'string') body = inp.file_path;
-  else body = JSON.stringify(inp);
-  if (body.length > 1500) body = body.slice(0, 1500) + '…';
-  return `${header(label)}\n🔐 Разрешение: <b>${esc(toolName)}</b>\n<pre>${esc(body)}</pre>`;
+  const str = (v) => typeof v === 'string';
+  const lines = [header(label), `🔐 Разрешение: <b>${esc(toolName)}</b>`];
+  if (toolName === 'Bash' && str(inp.command)) {
+    lines.push(preBlock(inp.command, BASH_MAX, 'команда обрезана'));
+  } else if (toolName === 'Edit' && str(inp.file_path)) {
+    lines.push(`<pre>${esc(inp.file_path)}</pre>`);
+    if (str(inp.old_string)) lines.push('Было:', preBlock(inp.old_string, EDIT_MAX));
+    if (str(inp.new_string)) lines.push('Стало:', preBlock(inp.new_string, EDIT_MAX));
+  } else if (toolName === 'Write' && str(inp.file_path)) {
+    lines.push(`<pre>${esc(inp.file_path)}</pre>`);
+    if (str(inp.content)) lines.push(preBlock(inp.content, WRITE_MAX));
+  } else {
+    lines.push(preBlock(JSON.stringify(inp), OTHER_MAX));
+  }
+  return lines.join('\n');
 }
 
 export function optionsKeyboard(dlgId, options) {
   return options.map((t, i) => [{ text: `${i + 1}. ${t}`, callback_data: `p|${dlgId}|${i + 1}` }]);
+}
+
+// Keyboard matching a dialog's current state (restored after a failed inject).
+export function dialogKeyboard(dlg) {
+  if (dlg.kind === 'ask') {
+    const q = dlg.payload?.questions?.[dlg.cursor];
+    return q ? askKeyboard(dlg.id, dlg.cursor, q, dlg.multi ?? []) : null;
+  }
+  return optionsKeyboard(dlg.id, dlg.options ?? []);
 }
 
 export function resolvedSuffix(kind, chosen) {

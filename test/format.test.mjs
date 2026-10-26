@@ -110,3 +110,63 @@ test('callback_data <= 64 bytes', () => {
   ];
   for (const c of all) assert.ok(Buffer.byteLength(c) <= 64, c);
 });
+
+// ---------- final-fix wave ----------
+
+test('minor: header("") -> 📁 <b>сессия</b>', () => {
+  assert.equal(F.header(''), '📁 <b>сессия</b>');
+  assert.equal(F.header(undefined), '📁 <b>сессия</b>');
+});
+
+test('F3: dialogKeyboard — ask uses cursor/question/multi, plan/perm use options', () => {
+  const q0 = mkq(2), q1 = mkq(3, true);
+  const ask = { id: 'abc123', kind: 'ask', cursor: 1, multi: [2], payload: { questions: [q0, q1] }, options: [] };
+  assert.deepEqual(F.dialogKeyboard(ask), F.askKeyboard('abc123', 1, q1, [2]));
+  const perm = { id: 'abc123', kind: 'perm', options: ['✅ Да', '⛔ Нет'] };
+  assert.deepEqual(F.dialogKeyboard(perm), F.optionsKeyboard('abc123', ['✅ Да', '⛔ Нет']));
+  const plan = { id: 'abc123', kind: 'plan', options: ['a', 'b', 'c'] };
+  assert.deepEqual(F.dialogKeyboard(plan), F.optionsKeyboard('abc123', ['a', 'b', 'c']));
+  assert.equal(F.dialogKeyboard({ id: 'x', kind: 'ask', cursor: 5, payload: { questions: [] } }), null);
+});
+
+const NOTE_CMD = (n) => `⚠ команда обрезана (всего ${n} символов) — полностью в терминале`;
+const NOTE = (n) => `⚠ обрезано (всего ${n} символов) — полностью в терминале`;
+
+test('F10: Bash command up to 3500 chars shown in full; longer -> first 3500 + note', () => {
+  const ok = 'a'.repeat(3500);
+  const t = F.permText('p', 'Bash', { command: ok });
+  assert.ok(t.includes(`<pre>${ok}</pre>`));
+  assert.ok(!t.includes('⚠'));
+  const long = 'b'.repeat(5000);
+  const t2 = F.permText('p', 'Bash', { command: long });
+  assert.ok(t2.includes(`<pre>${'b'.repeat(3500)}</pre>\n${NOTE_CMD(5000)}`));
+  assert.ok(!t2.includes('b'.repeat(3501)));
+});
+
+test('F10: never cuts a surrogate pair', () => {
+  const cmd = 'x'.repeat(3499) + '😀' + 'tail';
+  const t = F.permText('p', 'Bash', { command: cmd });
+  assert.ok(t.includes(`<pre>${'x'.repeat(3499)}</pre>`));
+  assert.ok(!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(t), 'no lone high surrogate');
+});
+
+test('F10: Edit shows file_path + old/new previews (≤ 800 each, note when cut)', () => {
+  const t = F.permText('p', 'Edit', { file_path: 'C:/a<b>.js', old_string: 'old & text', new_string: 'n'.repeat(900) });
+  assert.ok(t.includes('C:/a&lt;b&gt;.js'));
+  assert.ok(t.includes('<pre>old &amp; text</pre>'));
+  assert.ok(t.includes(`<pre>${'n'.repeat(800)}</pre>\n${NOTE(900)}`));
+  assert.ok(!t.includes('n'.repeat(801)));
+});
+
+test('F10: Write shows file_path + content preview ≤ 1200 with note; others JSON ≤ 1500 with note', () => {
+  const w = F.permText('p', 'Write', { file_path: 'C:/f.txt', content: 'c'.repeat(1300) });
+  assert.ok(w.includes('C:/f.txt'));
+  assert.ok(w.includes(`<pre>${'c'.repeat(1200)}</pre>\n${NOTE(1300)}`));
+  const shortW = F.permText('p', 'Write', { file_path: 'C:/f.txt', content: 'hi' });
+  assert.ok(shortW.includes('<pre>hi</pre>') && !shortW.includes('⚠'));
+  const o = F.permText('p', 'Other', { a: 'x'.repeat(5000) });
+  const json = JSON.stringify({ a: 'x'.repeat(5000) });
+  assert.ok(o.includes(`<pre>${F.esc(json.slice(0, 1500))}</pre>\n${NOTE(json.length)}`));
+  const small = F.permText('p', 'Other', { a: 1 });
+  assert.ok(small.includes('<pre>{"a":1}</pre>') && !small.includes('⚠'));
+});

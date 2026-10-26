@@ -59,7 +59,7 @@ test('invalid status from model with valid summary is normalised', async () => {
 test('input capped at 12000 chars', async () => {
   let prompt;
   await summarize('a\n'.repeat(10000), { failed: false, run: async (p) => { prompt = p; return '{"status":"done","summary":"s"}'; } });
-  assert.equal(prompt.length, 12000);
+  assert.equal(prompt.length, 12000 + '\n…\n'.length); // head 6000 + separator + tail 6000
 });
 
 test('fallback never splits a surrogate pair', () => {
@@ -82,4 +82,14 @@ test('live runClaude (opt-in)', { skip: process.env.CC_TG_LIVE !== '1' }, async 
   const j = JSON.parse(m[0]);
   assert.ok(['done', 'waiting', 'error'].includes(j.status));
   assert.equal(typeof j.summary, 'string');
+});
+
+test('minor: input longer than 12000 chars -> head 6000 + "\n…\n" + tail 6000', async () => {
+  const text = 'H'.repeat(7000) + 'M'.repeat(3000) + 'T'.repeat(7000);
+  let prompt;
+  await summarize(text, { run: async (p) => { prompt = p; return '{"status":"done","summary":"s"}'; } });
+  assert.equal(prompt, 'H'.repeat(6000) + '\n…\n' + 'T'.repeat(6000));
+  const exact = 'x'.repeat(12000);
+  await summarize(exact, { run: async (p) => { prompt = p; return '{"status":"done","summary":"s"}'; } });
+  assert.equal(prompt, exact);
 });

@@ -1,0 +1,270 @@
+// Telegram updates -> Effect[]. Mutates the Store, otherwise pure (no I/O).
+import { askText, askKeyboard, resolvedSuffix, statusText, sessionPickKeyboard, esc } from './format.mjs';
+import {
+  askSequence, planSequence, permissionSequence, instructionSequence, stopSequence, PLAN_FEEDBACK_INDEX,
+} from './keys.mjs';
+
+const MAX_EDIT_TEXT = 3900;
+const VERIFY_MS = 10000;
+
+const HELP_TEXT = [
+  'Команды:',
+  '/status — активные сессии',
+  '/stop — остановить сессию (ESC)',
+  '/help — эта справка',
+  '',
+  'Ответьте reply на сообщение проекта, чтобы отправить инструкцию в его сессию.',
+  'Если сессия одна — можно просто написать текст.',
+].join('\n');
+
+const isLive = d => !!d && (d.status === 'open' || d.status === 'injected');
+const verifyOf = d => ({ dialogId: d.id, timeoutMs: VERIFY_MS });
+const lastMessageId = d => d.messageIds[d.messageIds.length - 1];
+
+// Mark the dialog's last message as resolved from Telegram (keyboard removed).
+function resolvedEdit(dialog, chosen) {
+  const messageId = lastMessageId(dialog);
+  if (messageId == null) return [];
+  const suffix = resolvedSuffix('telegram', chosen);
+  const text = dialog.text ?? '';
+  if (text.length > MAX_EDIT_TEXT) {
+    return [
+      { type: 'edit', messageId, text: null, keyboard: null },
+      { type: 'send', text: suffix.trim(), replyTo: messageId, bind: { sessionId: dialog.sessionId } },
+    ];
+  }
+  return [{ type: 'edit', messageId, text: text + suffix, keyboard: null }];
+}
+
+function markInjected(store, dialog) {
+  dialog.status = 'injected';
+  dialog.source = 'telegram';
+  if (store.pendingOther === dialog.id) store.pendingOther = null;
+}
+
+// After an answer to question `cursor`: show the next question or inject the whole sequence.
+function advance(store, dialog, chosenLabel) {
+  const out = resolvedEdit(dialog, chosenLabel);
+  const questions = dialog.payload?.questions ?? [];
+  if (store.pendingOther === dialog.id) store.pendingOther = null;
+  if (dialog.cursor + 1 < questions.length) {
+    dialog.cursor++;
+    dialog.multi = [];
+    const q = questions[dialog.cursor];
+    dialog.text = askText(store.labelOf(dialog.sessionId), q, dialog.cursor, questions.length);
+    out.push({
+      type: 'send', text: dialog.text, keyboard: askKeyboard(dialog.id, dialog.cursor, q),
+      bind: { sessionId: dialog.sessionId, dialogId: dialog.id },
+    });
+    return out;
+  }
+  let steps;
+  try {
+    steps = askSequence(questions, dialog.answers);
+  } catch {
+    return [{ type: 'send', text: '⚠ Не удалось собрать ответ — ответьте в терминале', bind: { sessionId: dialog.sessionId } }];
+  }
+  out.unshift({ type: 'inject', sessionId: dialog.sessionId, steps, verify: verifyOf(dialog) });
+  markInjected(store, dialog);
+  return out;
+}
+
+const stopEffects = (store, session) => [
+  { type: 'inject', sessionId: session.id, steps: stopSequence() },
+  { type: 'send', text: '⏹ Остановлено: ' + esc(store.labelOf(session.id)), bind: { sessionId: session.id } },
+];
+
+const pickItems = store => store.liveSessions().map(s => ({ label: store.labelOf(s.id), short: s.short }));
+
+// ---------- callbacks ----------
+
+function handleCallback(store, cq) {
+  const ack = (text) => (text ? { type: 'answerCallback', callbackId: cq.id, text } : { type: 'answerCallback', callbackId: cq.id });
+  const parts = String(cq.data ?? '').split('|');
+  const [kind] = parts;
+
+  if (kind === 'x') {
+    const s = store.sessionByShort(parts[1]);
+    if (!s) return [ack('Сессия завершена')];
+    return [ack(), ...stopEffects(store, s)];
+  }
+
+  if (kind === 'r') {
+    const route = store.pendingRoute;
+    if (!route) return [ack('Устарело')];
+    const s = store.sessionByShort(parts[1]);
+    if (!s) return [ack('Сессия завершена')];
+    store.pendingRoute = null;
+    const out = [ack()];
+    const pickerId = cq.message?.message_id;
+    if (pickerId != null) out.push({ type: 'edit', messageId: pickerId, text: '➡️ ' + esc(store.labelOf(s.id)), keyboard: null });
+    out.push(...deliver(store, s, route.text, { replyTo: route.messageId }));
+    return out;
+  }
+
+  if (!['a', 't', 's', 'o', 'p'].includes(kind)) return [ack()];
+
+  const d = store.getDialog(parts[1]);
+  if (!d || d.status === 'closed') return [ack('Вопрос уже закрыт')];
+  if (d.status === 'injected') return [ack('Ответ уже отправлен')];
+
+  if (kind === 'p') {
+    const k = Number(parts[2]) - 1;
+    if (!Number.isInteger(k) || k < 0 || k >= d.options.length || (d.kind !== 'plan' && d.kind !== 'perm')) return [ack()];
+    if (d.kind === 'plan' && k === PLAN_FEEDBACK_INDEX) {
+      store.pendingOther = d.id;
+      return [ack(), {
+        type: 'send', text: '✏️ Напишите, что изменить в плане', forceReply: true,
+        bind: { sessionId: d.sessionId, dialogId: d.id },
+      }];
+    }
+    const inj = d.kind === 'plan'
+      ? { type: 'inject', sessionId: d.sessionId, steps: planSequence(k), verify: verifyOf(d) }
+      : { type: 'inject', sessionId: d.sessionId, steps: permissionSequence(k) };
+    // The last perm option is "No": it produces no PostToolUse, so nothing to verify.
+    if (d.kind === 'perm' && k < d.options.length - 1) inj.verify = verifyOf(d);
+    const edit = resolvedEdit(d, d.options[k]);
+    markInjected(store, d);
+    return [ack(), inj, ...edit];
+  }
+
+  // ask callbacks: a|dlg|q|opt, t|dlg|q|opt, s|dlg|q, o|dlg|q
+  if (d.kind !== 'ask') return [ack()];
+  const q = Number(parts[2]);
+  if (q !== d.cursor) return [ack('Этот вопрос уже пройден')];
+  const question = d.payload?.questions?.[q];
+  if (!question) return [ack()];
+  const options = question.options ?? [];
+
+  if (kind === 'o') {
+    store.pendingOther = d.id;
+    return [ack(), {
+      type: 'send', text: '✏️ Напишите свой вариант ответа', forceReply: true,
+      bind: { sessionId: d.sessionId, dialogId: d.id },
+    }];
+  }
+
+  if (kind === 's') {
+    if (!d.multi.length) return [ack('Выберите хотя бы один вариант')];
+    const indexes = [...new Set(d.multi)].sort((x, y) => x - y);
+    d.answers[q] = { kind: 'multi', indexes };
+    return [ack(), ...advance(store, d, indexes.map(i => options[i]?.label ?? '').join(', '))];
+  }
+
+  const i = Number(parts[3]) - 1;
+  if (!Number.isInteger(i) || i < 0 || i >= options.length) return [ack()];
+
+  if (kind === 't') {
+    d.multi = d.multi.includes(i) ? d.multi.filter(x => x !== i) : [...d.multi, i];
+    const messageId = lastMessageId(d);
+    const out = [ack()];
+    if (messageId != null) out.push({ type: 'edit', messageId, text: d.text ?? null, keyboard: askKeyboard(d.id, q, question, d.multi) });
+    return out;
+  }
+
+  // kind === 'a'
+  d.answers[q] = { kind: 'option', index: i };
+  return [ack(), ...advance(store, d, options[i].label)];
+}
+
+// ---------- text ----------
+
+// Deliver user text into a session: answer its open dialog or type it as an instruction.
+function deliver(store, session, text, { boundDialogId, replyTo } = {}) {
+  const bound = boundDialogId ? store.getDialog(boundDialogId) : null;
+  const other = store.pendingOther ? store.getDialog(store.pendingOther) : null;
+  let d = null;
+  if (isLive(bound) && bound.sessionId === session.id) d = bound;
+  else if (isLive(other) && other.sessionId === session.id) d = other;
+  else d = store.openDialogOf(session.id);
+
+  const bind = { sessionId: session.id };
+  if (d) {
+    if (d.status === 'injected') {
+      return [{ type: 'send', text: '⏳ Предыдущий ответ ещё обрабатывается — повторите через пару секунд', bind }];
+    }
+    if (d.kind === 'ask') {
+      d.answers[d.cursor] = { kind: 'other', text };
+      return advance(store, d, text);
+    }
+    if (d.kind === 'plan') {
+      const edit = resolvedEdit(d, 'правки: ' + text);
+      markInjected(store, d);
+      return [{ type: 'inject', sessionId: session.id, steps: planSequence(PLAN_FEEDBACK_INDEX, text) }, ...edit];
+    }
+    // perm (RF-3): never type free text into a permission prompt.
+    return [{ type: 'send', text: '🔐 В сессии открыт запрос разрешения — ответьте кнопками', bind }];
+  }
+
+  const sent = { type: 'send', text: '➡️ Отправлено в ' + esc(store.labelOf(session.id)), bind };
+  if (replyTo != null) sent.replyTo = replyTo;
+  return [{ type: 'inject', sessionId: session.id, steps: instructionSequence(text) }, sent];
+}
+
+function handleCommand(store, cmd, now) {
+  const live = store.liveSessions();
+  if (cmd === '/status') {
+    return [{ type: 'send', text: statusText(live.map(s => ({ label: store.labelOf(s.id), session: s })), now) }];
+  }
+  if (cmd === '/stop') {
+    if (!live.length) return [{ type: 'send', text: 'Нет активных сессий' }];
+    if (live.length === 1) return stopEffects(store, live[0]);
+    return [{ type: 'send', text: 'Какую сессию остановить?', keyboard: sessionPickKeyboard(pickItems(store), 'x') }];
+  }
+  return [{ type: 'send', text: HELP_TEXT }]; // /help, /start
+}
+
+const COMMANDS = new Set(['/status', '/stop', '/help', '/start']);
+
+function handleMessage(store, msg, now) {
+  if (typeof msg.text !== 'string' || !msg.text.trim()) return [{ type: 'send', text: 'Поддерживается только текст' }];
+  const text = msg.text;
+
+  const m = /^(\/[A-Za-z0-9_]+)(?:@[A-Za-z0-9_]+)?(?:\s|$)/.exec(text.trim());
+  // Unknown slash commands (e.g. /compact) are passed through to the session as text.
+  if (m && COMMANDS.has(m[1].toLowerCase())) return handleCommand(store, m[1].toLowerCase(), now);
+
+  const ended = [{ type: 'send', text: 'Сессия завершена' }];
+
+  // (1) reply to a bound bot message
+  const replyId = msg.reply_to_message?.message_id;
+  const binding = replyId != null ? store.lookupMessage(replyId) : null;
+  if (binding) {
+    const s = store.getSession(binding.sessionId);
+    if (!s) return ended;
+    return deliver(store, s, text, { boundDialogId: binding.dialogId, replyTo: msg.message_id });
+  }
+
+  // (2) pending "other" answer
+  const other = store.pendingOther ? store.getDialog(store.pendingOther) : null;
+  if (isLive(other)) {
+    const s = store.getSession(other.sessionId);
+    if (!s) return ended;
+    return deliver(store, s, text, { replyTo: msg.message_id });
+  }
+
+  // (3)-(5) by number of live sessions
+  const live = store.liveSessions();
+  if (live.length === 1) return deliver(store, live[0], text, { replyTo: msg.message_id });
+  if (!live.length) return [{ type: 'send', text: 'Нет активных сессий' }];
+  store.pendingRoute = { text, createdAt: now, messageId: msg.message_id };
+  return [{ type: 'send', text: 'В какую сессию отправить?', keyboard: sessionPickKeyboard(pickItems(store), 'r') }];
+}
+
+// ---------- entry ----------
+
+export function handleUpdate(store, update, { userId, now } = {}) {
+  if (userId == null || !update) return [];
+  const cq = update.callback_query;
+  if (cq) {
+    // RF-1: allowlist before anything else.
+    if (cq.from?.id !== userId || cq.message?.chat?.type !== 'private') return [];
+    return handleCallback(store, cq);
+  }
+  const msg = update.message;
+  if (msg) {
+    if (msg.from?.id !== userId || msg.chat?.type !== 'private') return [];
+    return handleMessage(store, msg, now);
+  }
+  return [];
+}

@@ -85,15 +85,17 @@ test('uninstall removes hooks, task, launcher; keeps .env', async () => {
 
 test('stop kills supervisor tree when parent is node.exe', async () => {
   const { home, d, calls } = setup();
+  d.fetch = async () => ({ ok: true, json: async () => ({ ok: true, sessions: 0 }) });
   const state = path.join(home, '.claude', 'telegram', 'state');
   fs.mkdirSync(state, { recursive: true });
   fs.writeFileSync(path.join(state, 'daemon.json'), JSON.stringify({ port: 1, secret: 's', pid: 200 }));
   d.listProcs = async () => new Map([[200, { name: 'node.exe', ppid: 100 }], [100, { name: 'node.exe', ppid: 1 }]]);
   await run(['stop'], d);
   assert.deepEqual(calls[0], ['taskkill', '/PID', '100', '/T', '/F']);
+  assert.ok(!fs.existsSync(path.join(state, 'daemon.json')));
 });
 
-test('stop with stale pid (not node.exe) kills nothing', async () => {
+test('stop with stale pid (not node.exe, non-empty list) kills nothing, removes daemon.json', async () => {
   const { home, d, calls } = setup();
   const state = path.join(home, '.claude', 'telegram', 'state');
   fs.mkdirSync(state, { recursive: true });
@@ -101,6 +103,7 @@ test('stop with stale pid (not node.exe) kills nothing', async () => {
   d.listProcs = async () => new Map([[200, { name: 'chrome.exe', ppid: 1 }]]);
   await run(['stop'], d);
   assert.equal(calls.length, 0);
+  assert.ok(!fs.existsSync(path.join(state, 'daemon.json')));
 });
 
 test('disable / enable toggle flag file', async () => {
@@ -145,4 +148,63 @@ test('renderLauncher substitutes repo and absolute node', () => {
   const tpl = fs.readFileSync(path.join(REPO, 'scripts', 'launch.vbs'), 'utf8');
   const out = renderLauncher(tpl, 'C:\\r', 'C:\\Program Files\\nodejs\\node.exe');
   assert.ok(out.includes('"""C:\\Program Files\\nodejs\\node.exe"" ""C:\\r\\src\\supervisor.mjs""'));
+});
+
+function withDaemon(extra = {}) {
+  const s = setup(extra);
+  const state = path.join(s.home, '.claude', 'telegram', 'state');
+  fs.mkdirSync(state, { recursive: true });
+  fs.writeFileSync(path.join(state, 'daemon.json'), JSON.stringify({ port: 1, secret: 's', pid: 200 }));
+  s.json = path.join(state, 'daemon.json');
+  return s;
+}
+const ALIVE = async () => ({ ok: true, json: async () => ({ ok: true, sessions: 0 }) });
+
+test('stop: empty process list + live /health -> nothing destructive', async () => {
+  const { d, calls, json } = withDaemon();
+  d.fetch = ALIVE;
+  d.listProcs = async () => new Map();
+  await run(['stop'], d);
+  assert.equal(calls.length, 0);
+  assert.ok(fs.existsSync(json));
+});
+
+test('stop: no /health but node.exe pid -> not killed, daemon.json kept', async () => {
+  const { d, calls, json, lines } = withDaemon();
+  d.listProcs = async () => new Map([[200, { name: 'node.exe', ppid: 1 }]]);
+  await run(['stop'], d);
+  assert.equal(calls.length, 0);
+  assert.ok(fs.existsSync(json));
+  assert.ok(lines.join('\n').includes('завершите вручную'));
+});
+
+test('stop: taskkill failure keeps daemon.json', async () => {
+  const { d, json } = withDaemon();
+  d.fetch = ALIVE;
+  d.listProcs = async () => new Map([[200, { name: 'node.exe', ppid: 1 }]]);
+  d.exec = async () => ({ code: 1, stdout: '', stderr: 'denied' });
+  await run(['stop'], d);
+  assert.ok(fs.existsSync(json));
+});
+
+test('settings write: unique backup names, no tmp left, uninstall no-op skips write', async () => {
+  const { home, d } = setup({ settings: JSON.stringify({ a: 1 }) });
+  await run(['install'], d);
+  await run(['install'], d);
+  const dir = path.join(home, '.claude');
+  const files = fs.readdirSync(dir);
+  assert.equal(files.filter((f) => f.startsWith('settings.json.bak-')).length, 2);
+  assert.ok(!files.some((f) => f.includes('.tmp-')));
+  const { home: h2, d: d2 } = setup({ settings: JSON.stringify({ a: 1 }) });
+  await run(['uninstall'], d2);
+  assert.ok(!fs.readdirSync(path.join(h2, '.claude')).some((f) => f.includes('.bak-')));
+});
+
+test('install: malformed hooks aborts before any side effect', async () => {
+  for (const bad of [{ hooks: [] }, { hooks: 'x' }, { hooks: { Stop: {} } }]) {
+    const { home, d, calls } = setup({ settings: JSON.stringify(bad) });
+    assert.equal(await run(['install'], d), 1);
+    assert.equal(calls.length, 0);
+    assert.ok(!fs.existsSync(path.join(home, '.claude', 'telegram')));
+  }
 });

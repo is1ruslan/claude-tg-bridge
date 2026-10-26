@@ -84,16 +84,27 @@ function readSettings(d) {
   try {
     const obj = JSON.parse(text);
     if (obj === null || typeof obj !== 'object' || Array.isArray(obj)) throw new Error('not an object');
+    const h = obj.hooks;
+    if (h !== undefined && (h === null || typeof h !== 'object' || Array.isArray(h) || Object.values(h).some((v) => !Array.isArray(v)))) {
+      throw new Error(`${file}: поле "hooks" имеет неожиданный формат (ожидается объект событий со списками). Исправьте файл вручную — установщик его не трогает.`);
+    }
     return { file, obj, existed: true };
   } catch (e) {
+    if (e.message.includes('"hooks"')) throw e;
     throw new Error(`${file} содержит некорректный JSON (${e.message}). Исправьте файл вручную — установщик его не трогает.`);
   }
 }
 
 function writeSettings(d, file, obj, existed) {
-  if (existed) d.fs.copyFileSync(file, `${file}.bak-${stamp(d.now())}`);
-  else d.fs.mkdirSync(path.dirname(file), { recursive: true });
-  d.fs.writeFileSync(file, `${JSON.stringify(obj, null, 2)}\n`);
+  if (existed) {
+    const base = `${file}.bak-${stamp(d.now())}`;
+    let bak = base;
+    for (let i = 1; d.fs.existsSync(bak); i++) bak = `${base}-${i}`;
+    d.fs.copyFileSync(file, bak);
+  } else d.fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = `${file}.tmp-${process.pid}`;
+  d.fs.writeFileSync(tmp, `${JSON.stringify(obj, null, 2)}\n`);
+  d.fs.renameSync(tmp, file);
 }
 
 function envFilled(d) {
@@ -122,16 +133,28 @@ async function stopDaemon(d) {
   const p = paths(d.home);
   const info = await daemonInfo(d);
   if (!info) { d.out('демон не запущен'); return false; }
+  const alive = Boolean(await health(d));
   const procs = await d.listProcs();
   const me = procs.get(info.pid);
-  if (!me || me.name.toLowerCase() !== 'node.exe') {
-    d.out('демон не запущен (daemon.json устарел)');
-    d.fs.rmSync(p.daemonJson, { force: true });
+  const isNode = Boolean(me) && me.name.toLowerCase() === 'node.exe';
+  if (procs.size === 0) {
+    d.out('не удалось определить процесс демона (список процессов недоступен); ничего не изменено');
     return false;
   }
+  if (!alive) {
+    if (!isNode) {
+      d.out('демон не запущен (daemon.json устарел)');
+      d.fs.rmSync(p.daemonJson, { force: true });
+    } else {
+      d.out(`демон не отвечает; pid ${info.pid} — завершите вручную при необходимости`);
+    }
+    return false;
+  }
+  if (!isNode) { d.out(`pid ${info.pid} не является node.exe; ничего не изменено`); return false; }
   const parent = procs.get(me.ppid);
   const target = parent && parent.name.toLowerCase() === 'node.exe' ? me.ppid : info.pid;
-  await d.exec('taskkill', ['/PID', String(target), '/T', '/F']);
+  const k = await d.exec('taskkill', ['/PID', String(target), '/T', '/F']);
+  if (k.code !== 0) { d.err(`taskkill не удался: ${k.stderr || k.stdout}`.trim()); return false; }
   d.fs.rmSync(p.daemonJson, { force: true });
   d.out(`демон остановлен (pid ${target})`);
   return true;
@@ -198,7 +221,11 @@ async function uninstall(d) {
   d.out(r.code === 0 ? `задача ${TASK} удалена` : `задача ${TASK} не найдена или не удалена`);
   try {
     const st = readSettings(d);
-    if (st.existed) { writeSettings(d, st.file, removeHooks(st.obj), true); d.out('хуки удалены из settings.json'); }
+    if (st.existed) {
+      const next = removeHooks(st.obj);
+      if (JSON.stringify(next) !== JSON.stringify(st.obj)) { writeSettings(d, st.file, next, true); d.out('хуки удалены из settings.json'); }
+      else d.out('в settings.json наших хуков нет');
+    }
   } catch (e) { d.err(e.message); }
   d.fs.rmSync(path.join(p.root, 'launch.vbs'), { force: true });
   d.out(`Оставлено: ${p.root} (.env, logs, state). Удалить вручную: rmdir /s /q "${p.root}"`);

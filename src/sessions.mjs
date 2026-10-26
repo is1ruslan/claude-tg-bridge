@@ -26,7 +26,8 @@ export class Store {
   // ---- sessions ----
   upsertSession(partial) {
     const prev = this.sessions.get(partial.id);
-    const s = { ...(prev ?? { pid: null, cwd: '', project: '', branch: '', state: 'idle', lastPromptAt: null }), ...partial };
+    const defined = Object.fromEntries(Object.entries(partial).filter(([, v]) => v !== undefined));
+    const s = { ...(prev ?? { pid: null, cwd: '', project: '', branch: '', state: 'idle', lastPromptAt: null }), ...defined };
     s.short = partial.short ?? prev?.short ?? partial.id.slice(0, 8);
     s.lastActivityAt = partial.lastActivityAt ?? Date.now();
     this.sessions.set(s.id, s);
@@ -89,6 +90,7 @@ export class Store {
   closeDialog(id, reason) {
     const d = this.dialogs.get(id);
     if (!d) return null;
+    if (d.status === 'closed') return d;
     d.status = 'closed';
     d.closedReason = reason;
     if (this.pendingOther === id) this.pendingOther = null;
@@ -113,8 +115,9 @@ export class Store {
       if (hit) return hit;
     }
     const kind = TOOL_KIND[toolName] ?? 'perm';
-    for (let i = mine.length - 1; i >= 0; i--) {
-      if (mine[i].status === 'open' && mine[i].kind === kind) return mine[i];
+    const same = mine.filter(d => d.kind === kind);
+    for (const st of ['injected', 'open']) {
+      for (let i = same.length - 1; i >= 0; i--) if (same[i].status === st) return same[i];
     }
     return null;
   }

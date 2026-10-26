@@ -174,3 +174,28 @@ test('toJSON/fromJSON round-trips everything', () => {
   assert.notEqual(n.id, d.id);
   assert.equal(Store.fromJSON(null).liveSessions().length, 0);
 });
+
+test('findDialogForTool finds injected perm dialog with null toolUseId (prefers injected)', () => {
+  const s = new Store();
+  s.upsertSession(sess('s1'));
+  const open = s.openDialog({ sessionId: 's1', kind: 'perm', payload: {} });
+  const inj = s.openDialog({ sessionId: 's1', kind: 'perm', payload: {} });
+  inj.status = 'injected';
+  const later = s.openDialog({ sessionId: 's1', kind: 'perm', payload: {} });
+  assert.equal(s.findDialogForTool('s1', 'Write', 'toolu_x'), inj);
+  inj.status = 'closed';
+  assert.equal(s.findDialogForTool('s1', 'Write', 'toolu_x'), later);
+  assert.notEqual(open, null);
+});
+
+test('closeDialog keeps first closedReason; upsert ignores undefined', () => {
+  const s = new Store();
+  s.upsertSession(sess('s1'));
+  const d = s.openDialog({ sessionId: 's1', kind: 'ask', payload: {} });
+  s.closeDialog(d.id, 'terminal');
+  s.closeDialog(d.id, 'ended');
+  assert.equal(d.closedReason, 'terminal');
+  s.upsertSession({ id: 's1', branch: undefined, state: 'working' });
+  assert.equal(s.getSession('s1').branch, 'main');
+  assert.equal(s.getSession('s1').state, 'working');
+});

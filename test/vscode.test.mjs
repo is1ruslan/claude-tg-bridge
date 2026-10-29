@@ -63,3 +63,37 @@ test('no ack within timeout → timeout; stale windows are ignored', async () =>
   t = 1000;
   assert.deepEqual(await b.dispatch({ cwd: 'C:\\x' }), { ok: false, error: 'no-window' });
 });
+
+test('cancel (connection closed / bye): window dropped, its queued job goes to the other window', async () => {
+  const b = createVscodeBridge();
+  const a = b.poll({ id: 'a', focusedAt: 10 }, { timeoutMs: 5 });
+  await a; // a is between polls now
+  const c = b.poll({ id: 'c', focusedAt: 1 });
+  const res = b.dispatch({ cwd: 'X:\\any' }); // a is most recently focused -> queued for a
+  b.cancel('a');
+  const job = await c;
+  assert.equal(job.cwd, 'X:\\any');
+  b.ack(job.id, { ok: true });
+  assert.deepEqual(await res, { ok: true });
+  assert.equal(b.windowCount(), 1);
+  b.close();
+});
+
+test('redeliver: job handed to a dead poll moves to another window, or fails with no-window', async () => {
+  const b = createVscodeBridge();
+  const a = b.poll({ id: 'a', focusedAt: 10 });
+  const res = b.dispatch({ cwd: 'X:\\any' });
+  const job = await a;
+  b.redeliver(job, 'a');
+  assert.deepEqual(await res, { ok: false, error: 'no-window' });
+  const a2 = b.poll({ id: 'a2', focusedAt: 10 });
+  const c = b.poll({ id: 'c', focusedAt: 1 });
+  const res2 = b.dispatch({ cwd: 'X:\\any' });
+  const j2 = await a2;
+  b.redeliver(j2, 'a2');
+  const j3 = await c;
+  assert.equal(j3.id, j2.id);
+  b.ack(j3.id, { ok: true });
+  assert.deepEqual(await res2, { ok: true });
+  b.close();
+});

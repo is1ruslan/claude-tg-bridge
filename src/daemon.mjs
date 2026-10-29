@@ -31,7 +31,6 @@ const BRANCH_EVENTS = new Set(['SessionStart', 'UserPromptSubmit']);
 const ANCESTOR_RETRY_MS = 60_000;
 const MAX_EDIT_TEXT = 3900;
 const RETRY_NOTE = '⚠ не удалось ввести — выберите снова';
-const NEWSESSION_SCRIPT = fileURLToPath(new URL('./newsession.mjs', import.meta.url));
 const VSCODE_POLL_MS = 25_000;
 const baseName = (p) => String(p).replace(/[\\/]+$/, '').split(/[\\/]/).pop() || String(p);
 
@@ -263,7 +262,8 @@ export async function startDaemon({
       log.error('spawn: prompt file write failed', { error: errText(err) });
       promptFile = null;
     }
-    const job = { cwd: e.cwd, title: '🤖 ' + name, node: process.execPath, script: NEWSESSION_SCRIPT, promptFile };
+    // node/newsession.mjs paths are baked into the extension at install time, never sent over HTTP.
+    const job = { cwd: e.cwd, title: '🤖 ' + name, promptFile };
     const pending = promptFile
       ? vscode.dispatch(job, { timeoutMs: spawnTimeoutMs })
       : Promise.resolve({ ok: false, error: 'prompt-file' });
@@ -277,13 +277,22 @@ export async function startDaemon({
       }
       log.warn('new session not started', { cwd: e.cwd, error: r.error });
       if (promptFile) fs.rmSync(promptFile, { force: true });
-      // The text is not lost: restore the route so «Повторить» (f|key|0) spawns again.
-      store.pendingRoute = { text: e.text, createdAt: now(), messageId: e.replyTo, folders: [e.cwd], pickerId: e.pickerId ?? undefined };
-      const why = r.error === 'timeout' || r.error === 'no-window' ? '' : `\n(${esc(r.error ?? 'ошибка')})`;
-      await send({
-        text: '⚠ VS Code не отвечает — сессия не создана' + why,
-        keyboard: [[{ text: '🔁 Повторить', callback_data: `f|${e.msgKey}|0` }]],
-      });
+      if (e.pickerId != null) {
+        await telegram.editMessage({ chatId, messageId: e.pickerId, text: '⚠ Не запущено: ' + esc(name), keyboard: null })
+          .catch((err) => log.warn('picker edit failed', { error: errText(err) }));
+      }
+      const noAnswer = r.error === 'timeout' || r.error === 'no-window';
+      const text = noAnswer
+        ? '⚠ VS Code не отвечает — сессия не создана'
+        : `⚠ Не удалось запустить сессию: ${esc(r.error ?? 'ошибка')}`;
+      // The text is not lost: restore the route so «Повторить» (f|key|0) spawns again —
+      // unless the user has sent a newer message meanwhile (its picker must keep working).
+      if (store.pendingRoute == null) {
+        store.pendingRoute = { text: e.text, createdAt: now(), messageId: e.replyTo, folders: [e.cwd], pickerId: e.pickerId ?? undefined };
+        await send({ text, keyboard: [[{ text: '🔁 Повторить', callback_data: `f|${e.msgKey}|0` }]] });
+      } else {
+        await send({ text, replyTo: e.replyTo });
+      }
     })));
   }
 
@@ -437,11 +446,17 @@ export async function startDaemon({
       },
       // VS Code extension: long poll for a job (200 + job JSON, or 204 when none).
       '/vscode/poll': (body) => {
+        const win = body ?? {};
         let closed = false;
-        res.on('close', () => { closed = true; });
-        vscode.poll(body ?? {}, { timeoutMs: VSCODE_POLL_MS }).then((job) => {
+        // Closed before we answered (window reloaded/closed): the window is gone until it polls again.
+        res.on('close', () => {
+          if (res.writableFinished) return;
+          closed = true;
+          vscode.cancel(win.id);
+        });
+        vscode.poll(win, { timeoutMs: VSCODE_POLL_MS }).then((job) => {
           if (closed) {
-            if (job) vscode.ack(job.id, { ok: false, error: 'poll connection closed' });
+            if (job) vscode.redeliver(job, win.id);
             return;
           }
           if (!job) { res.statusCode = 204; res.end(); return; }
@@ -451,6 +466,11 @@ export async function startDaemon({
       },
       '/vscode/ack': (body) => {
         vscode.ack(body?.jobId, body);
+        res.statusCode = 204;
+        res.end();
+      },
+      '/vscode/bye': (body) => {
+        vscode.cancel(body?.id);
         res.statusCode = 204;
         res.end();
       },

@@ -32,11 +32,21 @@ function unzip(buf) {
 
 test('buildVsix: manifest + package.json + extension.js; identity matches EXT_ID', () => {
   const out = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'cct-vsix-')), 'x.vsix');
-  buildVsix(path.join(REPO, 'vscode-ext'), out);
+  buildVsix(path.join(REPO, 'vscode-ext'), out, { node: 'C:\\node\\node.exe', script: 'C:\\repo\\src\\newsession.mjs' });
   const files = unzip(fs.readFileSync(out));
-  assert.deepEqual(Object.keys(files).sort(), ['[Content_Types].xml', 'extension.vsixmanifest', 'extension/extension.js', 'extension/package.json']);
+  assert.deepEqual(Object.keys(files).sort(), [
+    '[Content_Types].xml', 'extension.vsixmanifest', 'extension/config.json', 'extension/extension.js', 'extension/package.json',
+  ]);
+  assert.deepEqual(JSON.parse(files['extension/config.json']), { node: 'C:\\node\\node.exe', script: 'C:\\repo\\src\\newsession.mjs' });
+  assert.match(files['extension/extension.js'], /require\('\.\/config\.json'\)/);
+  assert.doesNotMatch(files['extension/extension.js'], /job\.node|job\.script/);
   const pkg = JSON.parse(files['extension/package.json']);
   assert.equal(`${pkg.publisher}.${pkg.name}`, EXT_ID);
   assert.match(files['extension.vsixmanifest'], new RegExp(`Id="${pkg.name}" Version="${pkg.version}" Publisher="${pkg.publisher}"`));
   assert.match(files['extension/extension.js'], /\/vscode\/poll/);
+});
+
+test('buildVsix: refuses without node/script config', () => {
+  const out = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'cct-vsix-')), 'x.vsix');
+  assert.throws(() => buildVsix(path.join(REPO, 'vscode-ext'), out), /config\.node/);
 });

@@ -7,6 +7,13 @@ import { resolveClaude } from './summary.mjs';
 // A prompt starting with "-" would be parsed as a CLI flag; a leading space keeps it a prompt.
 export const promptArg = (text) => (/^\s*-/.test(text) ? ' ' + text : text);
 
+// -> { cmd, args } or { error }. Never through a shell: the prompt is untrusted text from Telegram
+// and cmd.exe would interpret & | > % and cut it at the first newline.
+export function claudeLaunch(prompt, claude = resolveClaude()) {
+  if (claude.shell) return { error: `найден только ${claude.cmd} (без claude.exe) — запуск через cmd небезопасен` };
+  return { cmd: claude.cmd, args: prompt.trim() ? [promptArg(prompt)] : [] };
+}
+
 function main(promptFile) {
   let prompt = '';
   try {
@@ -19,10 +26,13 @@ function main(promptFile) {
   process.on('SIGINT', () => {});
   const env = { ...process.env };
   delete env.CC_TELEGRAM_DISABLE;
-  const { cmd, shell } = resolveClaude();
-  const args = prompt.trim() ? [promptArg(prompt)] : [];
-  const r = spawnSync(shell ? `"${cmd}"` : cmd, args, { stdio: 'inherit', env, shell });
-  if (r.error) process.stderr.write(`cc-telegram: claude не запустился (${r.error.message})\n`);
+  const launch = claudeLaunch(prompt);
+  if (launch.error) {
+    process.stderr.write(`cc-telegram: ${launch.error}\nПромпт:\n${prompt}\n`);
+  } else {
+    const r = spawnSync(launch.cmd, launch.args, { stdio: 'inherit', env });
+    if (r.error) process.stderr.write(`cc-telegram: claude не запустился (${r.error.message})\n`);
+  }
   spawnSync('powershell.exe', ['-NoLogo'], { stdio: 'inherit', env });
 }
 

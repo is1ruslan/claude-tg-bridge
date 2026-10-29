@@ -271,7 +271,9 @@ async function install(d) {
   const vsix = path.join(p.root, 'cc-telegram-bridge.vsix');
   let extLine;
   try {
-    (d.buildVsix ?? buildVsix)(path.join(d.repo, 'vscode-ext'), vsix);
+    (d.buildVsix ?? buildVsix)(path.join(d.repo, 'vscode-ext'), vsix, {
+      node: d.execPath, script: path.join(d.repo, 'src', 'newsession.mjs'),
+    });
     const x = await d.exec('cmd.exe', ['/d', '/c', 'code', '--install-extension', vsix, '--force']);
     extLine = x.code === 0
       ? '  - расширение VS Code cc-telegram-bridge (один раз выполните в VS Code: Developer: Reload Window)'

@@ -79,12 +79,15 @@ export function zip(entries) {
   return Buffer.concat([...locals, cenBuf, end]);
 }
 
-export function buildVsix(extDir, outFile) {
+// config: { node, script } — absolute paths the extension runs in the new terminal (baked in at install).
+export function buildVsix(extDir, outFile, config) {
+  if (!config?.node || !config?.script) throw new Error('buildVsix: config.node and config.script are required');
   const pkg = JSON.parse(fs.readFileSync(path.join(extDir, 'package.json'), 'utf8'));
   const entries = [
     { name: '[Content_Types].xml', data: Buffer.from(CONTENT_TYPES) },
     { name: 'extension.vsixmanifest', data: Buffer.from(vsixManifest(pkg)) },
     ...['package.json', 'extension.js'].map((f) => ({ name: 'extension/' + f, data: fs.readFileSync(path.join(extDir, f)) })),
+    { name: 'extension/config.json', data: Buffer.from(JSON.stringify({ node: config.node, script: config.script }, null, 2)) },
   ];
   fs.mkdirSync(path.dirname(outFile), { recursive: true });
   fs.writeFileSync(outFile, zip(entries));

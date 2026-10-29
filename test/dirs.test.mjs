@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { recentDirs, normDir } from '../src/dirs.mjs';
+import { recentDirs, normDir, looksLikeDir } from '../src/dirs.mjs';
 
 function mkProjects(spec) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cct-dirs-'));
@@ -18,7 +18,7 @@ function mkProjects(spec) {
   return root;
 }
 
-test('recentDirs: newest first, dedup case-insensitive, missing folders skipped, limit', () => {
+test('recentDirs: newest first, dedup case-insensitive, missing folders skipped, limit', async () => {
   const root = mkProjects([
     { enc: 'a', cwd: 'C:\\P\\alpha', age: 50 },
     { enc: 'b', cwd: 'C:\\P\\beta', age: 10 },
@@ -27,24 +27,29 @@ test('recentDirs: newest first, dedup case-insensitive, missing folders skipped,
     { enc: 'e', cwd: 'C:\\P\\eps', age: 100 },
   ]);
   const exists = (p) => !/gone/.test(p);
-  const r = recentDirs({ projectsDir: root, exists });
+  const r = await recentDirs({ projectsDir: root, exists });
   assert.deepEqual(r.map((d) => d.path), ['c:\\p\\ALPHA', 'C:\\P\\beta', 'C:\\P\\eps']);
   assert.deepEqual(r.map((d) => d.label), ['ALPHA', 'beta', 'eps']);
-  assert.equal(recentDirs({ projectsDir: root, exists, limit: 2 }).length, 2);
+  assert.equal((await recentDirs({ projectsDir: root, exists, limit: 2 })).length, 2);
 });
 
-test('recentDirs: same folder name -> parent\\name labels', () => {
+test('recentDirs: same folder name -> parent\\name labels', async () => {
   const root = mkProjects([
     { enc: 'a', cwd: 'C:\\one\\app', age: 1 },
     { enc: 'b', cwd: 'C:\\two\\app', age: 2 },
   ]);
-  assert.deepEqual(recentDirs({ projectsDir: root, exists: () => true }).map((d) => d.label), ['one\\app', 'two\\app']);
+  assert.deepEqual((await recentDirs({ projectsDir: root, exists: () => true })).map((d) => d.label), ['one\\app', 'two\\app']);
 });
 
-test('recentDirs: missing projects dir -> []', () => {
-  assert.deepEqual(recentDirs({ projectsDir: path.join(os.tmpdir(), 'nope-' + Date.now()) }), []);
+test('recentDirs: missing projects dir -> []', async () => {
+  assert.deepEqual(await recentDirs({ projectsDir: path.join(os.tmpdir(), 'nope-' + Date.now()) }), []);
 });
 
 test('normDir', () => {
   assert.equal(normDir('C:/Projects/X/'), 'c:\\projects\\x');
+});
+
+test('looksLikeDir: absolute drive or UNC paths only, single line', () => {
+  for (const s of ['C:\\Projects\\app', 'd:/work', '\\\\server\\share']) assert.equal(looksLikeDir(s), true, s);
+  for (const s of ['Projects', 'сделай тесты', '/compact', 'C:\\a\nb', '.\\x', 'C:']) assert.equal(looksLikeDir(s), false, s);
 });

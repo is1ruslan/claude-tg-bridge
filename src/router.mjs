@@ -2,6 +2,7 @@
 import {
   askText, askKeyboard, resolvedSuffix, statusText, sessionPickKeyboard, routePickKeyboard, folderPickKeyboard, esc,
 } from './format.mjs';
+import { looksLikeDir } from './dirs.mjs';
 import {
   askSequence, planSequence, permissionSequence, instructionSequence, stopSequence, PLAN_FEEDBACK_INDEX,
 } from './keys.mjs';
@@ -140,7 +141,7 @@ function handleCallback(store, cq, now, ctx) {
     if (parts[2] === 'o') {
       route.awaitingDir = true;
       route.pickerId = pickerId;
-      return [ack(), { type: 'send', text: '📂 Пришлите путь к папке (например C:\\Projects\\app)', forceReply: true }];
+      return [ack(), { type: 'send', text: '📂 Пришлите полный путь к папке (например C:\\Projects\\app). Другой текст отменит выбор папки.', forceReply: true }];
     }
     const cwd = route.folders?.[Number(parts[2])];
     if (cwd == null) return [ack(STALE)];
@@ -295,15 +296,19 @@ function handleMessage(store, msg, now, ctx) {
   const replyId = msg.reply_to_message?.message_id;
   const binding = replyId != null ? store.lookupMessage(replyId) : null;
 
-  // (0) folder path for «Другая папка» (plain text or a reply to the unbound path prompt)
+  // (0) folder path for «Другая папка» (plain text or a reply to the unbound path prompt).
+  // Only an absolute path counts; any other text cancels the folder question and is handled normally.
   const route = store.pendingRoute;
   if (route?.awaitingDir && !binding) {
     const dir = text.trim().replace(/^["']+|["']+$/g, '').trim();
-    if (!dir || !(ctx.isDir ?? (() => false))(dir)) {
-      return [{ type: 'send', text: '⚠ Папка не найдена — пришлите путь ещё раз', forceReply: true }];
+    if (looksLikeDir(dir)) {
+      if (!(ctx.isDir ?? (() => false))(dir)) {
+        return [{ type: 'send', text: '⚠ Папка не найдена — пришлите путь ещё раз', forceReply: true }];
+      }
+      store.pendingRoute = null;
+      return spawnEffects(route, dir, route.pickerId);
     }
-    store.pendingRoute = null;
-    return spawnEffects(route, dir, route.pickerId);
+    route.awaitingDir = false;
   }
   if (binding) {
     const s = store.getSession(binding.sessionId);

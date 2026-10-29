@@ -1,13 +1,17 @@
 // cc-telegram bridge: long-polls the local cc-telegram daemon (127.0.0.1, secret from daemon.json)
 // and opens a terminal running `node newsession.mjs <promptFile>` for each "new session" job.
-// No ports are opened and nothing leaves the machine.
+// No ports are opened and nothing leaves the machine. The node and newsession.mjs paths come from
+// config.json written at install time — never from the HTTP response.
 const vscode = require('vscode');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 
-const DAEMON_JSON = path.join(os.homedir(), '.claude', 'telegram', 'state', 'daemon.json');
+const CONFIG = require('./config.json');
+const STATE_DIR = path.join(os.homedir(), '.claude', 'telegram', 'state');
+const DAEMON_JSON = path.join(STATE_DIR, 'daemon.json');
+const SPAWN_DIR = path.join(STATE_DIR, 'spawn');
 const RETRY_MS = 5000;
 const POLL_TIMEOUT_MS = 35000; // daemon answers within 25 s
 
@@ -36,12 +40,19 @@ function post(d, url, body, ms) {
 const folders = () => (vscode.workspace.workspaceFolders || []).map((f) => f.uri.fsPath);
 
 function openTerminal(job) {
-  if (!fs.existsSync(job.cwd)) throw new Error('папка не найдена: ' + job.cwd);
+  const cwd = String(job.cwd || '');
+  if (!path.isAbsolute(cwd) || !fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) {
+    throw new Error('папка не найдена: ' + cwd);
+  }
+  const promptFile = path.resolve(String(job.promptFile || ''));
+  if (path.dirname(promptFile).toLowerCase() !== SPAWN_DIR.toLowerCase() || !fs.existsSync(promptFile)) {
+    throw new Error('неверный файл промпта');
+  }
   const t = vscode.window.createTerminal({
-    name: job.title,
-    cwd: job.cwd,
-    shellPath: job.node,
-    shellArgs: [job.script, job.promptFile],
+    name: String(job.title || 'claude'),
+    cwd,
+    shellPath: CONFIG.node,
+    shellArgs: [CONFIG.script, promptFile],
     iconPath: new vscode.ThemeIcon('hubot'),
   });
   t.show(true);
@@ -79,6 +90,10 @@ function activate(context) {
   loop();
 }
 
-function deactivate() { stopped = true; }
+function deactivate() {
+  stopped = true;
+  const d = daemon();
+  if (d) return post(d, '/vscode/bye', { id: windowId }, 2000).catch(() => {});
+}
 
 module.exports = { activate, deactivate };

@@ -674,3 +674,21 @@ test('new: n| / f| with stale msgKey → «Устарело»', () => {
   assert.equal(h.upd(h.cb(`n|${u1.message.message_id}`), { recentDirs: DIRS })[0].text, 'Устарело');
   assert.equal(h.upd(h.cb(`f|${u1.message.message_id}|0`))[0].text, 'Устарело');
 });
+
+test('new: after «Другая папка» a non-path text cancels the folder question and is handled as a new message', () => {
+  const h = started();
+  const u = h.text('задача');
+  const [pick] = sends(h.upd(u));
+  const k = u.message.message_id;
+  ctxUpd(h, h.cb(`n|${k}`, { messageId: pick.messageId }), { recentDirs: [] });
+  h.upd(h.cb(`f|${k}|o`, { messageId: pick.messageId }));
+  const isDir = () => true;
+  for (const t of ['передумал, сделай тесты', 'Projects']) {
+    const u2 = h.text(t);
+    const eff = ctxUpd(h, u2, { isDir });
+    assert.equal(ofType(eff, 'spawn').length, 0, t);
+    assert.equal(sends(eff)[0].text, 'Куда отправить?', t);
+    assert.equal(h.store.pendingRoute.text, t);
+    assert.equal(h.store.pendingRoute.awaitingDir, undefined);
+  }
+});

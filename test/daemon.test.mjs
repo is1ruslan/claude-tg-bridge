@@ -782,8 +782,9 @@ test('vscode: text → n| (recentDirs) → f| → job to the polling window with
     const job = await r.json();
     assert.equal(job.cwd, 'C:\\Projects\\beta');
     assert.equal(job.title, '🤖 beta');
-    assert.equal(job.node, process.execPath);
-    assert.match(job.script, /newsession\.mjs$/);
+    assert.equal(job.node, undefined, 'executable paths never travel over HTTP');
+    assert.equal(job.script, undefined);
+    assert.equal(path.dirname(job.promptFile), path.join(s.paths.stateDir, 'spawn'));
     assert.equal(fs.readFileSync(job.promptFile, 'utf8'), 'напиши "README" $HOME\nвторая строка');
     assert.equal((await vpost(s, '/vscode/ack', { jobId: job.id, ok: true })).status, 204);
     await waitFor(() => s.telegram.edits.some((e) => e.text === '🆕 Запущено: beta'));
@@ -822,5 +823,58 @@ test('vscode: a slow spawn does not block other updates', async () => {
     await poll; // job delivered, never acked
     s.telegram.push(msg('/status'));
     await waitFor(() => s.telegram.sent.some((m) => m.text === 'Активных сессий нет'), 1000);
+  } finally { await s.d.close(); }
+});
+
+test('vscode: poll connection dropped (window reloaded) → job goes to the other window', async () => {
+  const s = await setup({ extra: { recentDirs: async () => DIRS, spawnTimeoutMs: 3000 } });
+  try {
+    const ac = new AbortController();
+    const dead = fetch(`http://127.0.0.1:${s.d.port}/vscode/poll`, {
+      method: 'POST', headers: { 'x-cc-secret': s.dj.secret }, body: JSON.stringify({ id: 'dead', folders: [], focusedAt: 99 }), signal: ac.signal,
+    }).catch(() => null);
+    const live = vpost(s, '/vscode/poll', { id: 'live', folders: [], focusedAt: 1 });
+    await new Promise((r) => setTimeout(r, 50));
+    ac.abort();
+    await dead;
+    await new Promise((r) => setTimeout(r, 50));
+    await toFolderPicker(s, 'задача');
+    s.telegram.push(cb('f|500|0', 'cbf'));
+    const job = await (await live).json();
+    assert.equal(job.cwd, 'C:\\Projects\\alpha');
+    await vpost(s, '/vscode/ack', { jobId: job.id, ok: true });
+    await waitFor(() => s.telegram.edits.some((e) => e.text === '🆕 Запущено: alpha'));
+  } finally { await s.d.close(); }
+});
+
+test('vscode: /vscode/bye drops the window at once', async () => {
+  const s = await setup({ extra: { recentDirs: async () => DIRS, spawnTimeoutMs: 3000 } });
+  try {
+    const p = vpost(s, '/vscode/poll', { id: 'w', folders: [] });
+    await new Promise((r) => setTimeout(r, 30));
+    assert.equal((await vpost(s, '/vscode/bye', { id: 'w' })).status, 204);
+    assert.equal((await p).status, 204);
+    await toFolderPicker(s, 'задача');
+    s.telegram.push(cb('f|500|0', 'cbf'));
+    await waitFor(() => s.telegram.sent.some((m) => /VS Code не отвечает/.test(m.text)));
+  } finally { await s.d.close(); }
+});
+
+test('vscode: extension error → «Не удалось запустить: …», picker marked; newer route is kept', async () => {
+  const s = await setup({ extra: { recentDirs: async () => DIRS, spawnTimeoutMs: 3000 } });
+  try {
+    const poll = vpost(s, '/vscode/poll', { id: 'w', folders: [] });
+    await toFolderPicker(s, 'первая');
+    s.telegram.push(cb('f|500|0', 'cbf'));
+    const job = await (await poll).json();
+    // a newer message arrives while the spawn is pending
+    s.telegram.push({ ...msg('вторая'), message: { ...msg('вторая').message, message_id: 501 } });
+    await waitFor(() => s.d.store.pendingRoute?.text === 'вторая');
+    await vpost(s, '/vscode/ack', { jobId: job.id, ok: false, error: 'папка не найдена: C:\\Projects\\alpha' });
+    await waitFor(() => s.telegram.sent.some((m) => /Не удалось запустить сессию: папка не найдена/.test(m.text)));
+    const warn = s.telegram.sent.find((m) => /Не удалось запустить/.test(m.text));
+    assert.equal(warn.keyboard, undefined, 'no retry button: the newer route owns the picker');
+    assert.equal(s.d.store.pendingRoute.text, 'вторая');
+    assert.ok(s.telegram.edits.some((e) => e.text === '⚠ Не запущено: alpha'));
   } finally { await s.d.close(); }
 });

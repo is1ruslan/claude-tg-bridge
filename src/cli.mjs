@@ -364,7 +364,12 @@ export async function run(argv, d = defaultDeps()) {
     case 'enable': d.fs.rmSync(p.disabledFlag, { force: true }); d.out('мост включён'); return 0;
     case 'stop': await stopDaemon(d); return 0;
     case 'start': return (await startDaemon(d)) ? 0 : 1;
-    case 'restart': await stopDaemon(d); return (await startDaemon(d)) ? 0 : 1;
+    case 'restart':
+      await stopDaemon(d);
+      // The task instance (wscript waiting on the supervisor) may still count as running;
+      // with MultipleInstancesPolicy=IgnoreNew the next /Run would then be silently dropped.
+      await d.exec('schtasks', ['/End', '/TN', TASK]);
+      return (await startDaemon(d)) ? 0 : 1;
     case undefined: case '--help': case '-h': case 'help': d.out(USAGE); return 0;
     default: d.err(`неизвестная команда: ${cmd}\n\n${USAGE}`); return 1;
   }

@@ -309,3 +309,12 @@ test('F8: XML escapes special characters in paths and user name', async () => {
   assert.ok(xml.includes('<UserId>D&amp;D\\bo&lt;b&gt;</UserId>'));
   assert.ok(xml.includes('<Arguments>"C:\\a&amp;b\\launch.vbs"</Arguments>'));
 });
+
+test('restart ends the lingering task instance before /Run (IgnoreNew would drop it)', async () => {
+  const { d, calls } = setup();
+  d.fetch = async () => ({ ok: true, json: async () => ({ ok: true, sessions: 0 }) });
+  await run(['restart'], d);
+  const i = calls.findIndex((c) => c[0] === 'schtasks' && c[1] === '/End');
+  const j = calls.findIndex((c) => c[0] === 'schtasks' && c[1] === '/Run');
+  assert.ok(i >= 0 && j > i, JSON.stringify(calls));
+});

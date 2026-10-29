@@ -15,6 +15,19 @@ export function isDir(p) {
 // Only absolute local or UNC paths count as a folder answer (anything else is a normal message).
 export const looksLikeDir = (s) => /^([A-Za-z]:[\\/]|\\\\[^\\])/.test(s) && !/[\r\n]/.test(s);
 
+export const PROJECTS_ROOT = 'C:\\Projects';
+const RESERVED = /^(con|prn|aux|nul|com\d|lpt\d)(\..*)?$/i;
+
+// A missing folder may be created only as a direct child of `root` with a valid Windows name.
+// -> normalized absolute path, or null.
+export function newProjectDir(dir, root = PROJECTS_ROOT) {
+  const p = path.win32.normalize(String(dir ?? '').replace(/\//g, '\\')).replace(/\\+$/, '');
+  if (normDir(path.win32.dirname(p)) !== normDir(root)) return null;
+  const name = path.win32.basename(p);
+  if (!name || name === '.' || name === '..' || /[<>:"|?*\x00-\x1f]/.test(name) || /[. ]$/.test(name) || RESERVED.test(name)) return null;
+  return path.win32.join(root, name);
+}
+
 async function cwdOf(file) {
   let fh;
   try {

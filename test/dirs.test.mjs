@@ -3,7 +3,16 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { recentDirs, normDir, looksLikeDir } from '../src/dirs.mjs';
+import { recentDirs, normDir, looksLikeDir, newProjectDir } from '../src/dirs.mjs';
+
+test('newProjectDir: only a direct child of C:\\Projects with a valid name', () => {
+  assert.equal(newProjectDir('C:\\Projects\\test-tg'), 'C:\\Projects\\test-tg');
+  assert.equal(newProjectDir('c:/projects/new app/'), 'C:\\Projects\\new app');
+  for (const bad of ['C:\\Projects', 'C:\\Projects\\a\\b', 'D:\\Projects\\x', 'C:\\Other\\x', 'C:\\Projects\\..\\x',
+    'C:\\Projects\\a?b', 'C:\\Projects\\con', 'C:\\Projects\\name.', 'C:\\Projects\\x:y']) {
+    assert.equal(newProjectDir(bad), null, bad);
+  }
+});
 
 function mkProjects(spec) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cct-dirs-'));

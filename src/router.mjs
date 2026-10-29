@@ -2,7 +2,7 @@
 import {
   askText, askKeyboard, resolvedSuffix, statusText, sessionPickKeyboard, routePickKeyboard, folderPickKeyboard, esc,
 } from './format.mjs';
-import { looksLikeDir } from './dirs.mjs';
+import { looksLikeDir, newProjectDir, PROJECTS_ROOT } from './dirs.mjs';
 import {
   askSequence, planSequence, permissionSequence, instructionSequence, stopSequence, PLAN_FEEDBACK_INDEX,
 } from './keys.mjs';
@@ -100,10 +100,13 @@ const ALREADY_STOPPED = 'уже остановлено';
 const baseName = (p) => String(p).replace(/[\\/]+$/, '').split(/[\\/]/).pop() || String(p);
 const STALE = 'Устарело';
 
-function spawnEffects(route, cwd, pickerId) {
+function spawnEffects(route, cwd, pickerId, { create = false } = {}) {
   const out = [];
-  if (pickerId != null) out.push({ type: 'edit', messageId: pickerId, text: '🆕 Запускаю в ' + esc(baseName(cwd)) + '…', keyboard: null });
-  out.push({ type: 'spawn', cwd, text: route.text, replyTo: route.messageId, msgKey: String(route.messageId), pickerId: pickerId ?? null });
+  const what = (create ? '🆕 Создаю папку и запускаю в ' : '🆕 Запускаю в ') + esc(baseName(cwd)) + '…';
+  if (pickerId != null) out.push({ type: 'edit', messageId: pickerId, text: what, keyboard: null });
+  const spawn = { type: 'spawn', cwd, text: route.text, replyTo: route.messageId, msgKey: String(route.messageId), pickerId: pickerId ?? null };
+  if (create) spawn.create = true;
+  out.push(spawn);
   return out;
 }
 
@@ -141,7 +144,7 @@ function handleCallback(store, cq, now, ctx) {
     if (parts[2] === 'o') {
       route.awaitingDir = true;
       route.pickerId = pickerId;
-      return [ack(), { type: 'send', text: '📂 Пришлите полный путь к папке (например C:\\Projects\\app). Другой текст отменит выбор папки.', forceReply: true }];
+      return [ack(), { type: 'send', text: `📂 Пришлите полный путь к папке (например ${PROJECTS_ROOT}\\app). Если такой папки в ${PROJECTS_ROOT} нет — создам. Другой текст отменит выбор папки.`, forceReply: true }];
     }
     const cwd = route.folders?.[Number(parts[2])];
     if (cwd == null) return [ack(STALE)];
@@ -302,11 +305,20 @@ function handleMessage(store, msg, now, ctx) {
   if (route?.awaitingDir && !binding) {
     const dir = text.trim().replace(/^["']+|["']+$/g, '').trim();
     if (looksLikeDir(dir)) {
-      if (!(ctx.isDir ?? (() => false))(dir)) {
-        return [{ type: 'send', text: '⚠ Папка не найдена — пришлите путь ещё раз', forceReply: true }];
+      if ((ctx.isDir ?? (() => false))(dir)) {
+        store.pendingRoute = null;
+        return spawnEffects(route, dir, route.pickerId);
       }
-      store.pendingRoute = null;
-      return spawnEffects(route, dir, route.pickerId);
+      // Missing folder directly inside the projects root → create it; anything else is a typo.
+      const created = newProjectDir(dir, ctx.projectsRoot);
+      if (created) {
+        store.pendingRoute = null;
+        return spawnEffects(route, created, route.pickerId, { create: true });
+      }
+      return [{
+        type: 'send', forceReply: true,
+        text: `⚠ Папка не найдена — пришлите путь ещё раз (новая папка создаётся только прямо в ${esc(ctx.projectsRoot ?? PROJECTS_ROOT)})`,
+      }];
     }
     route.awaitingDir = false;
   }

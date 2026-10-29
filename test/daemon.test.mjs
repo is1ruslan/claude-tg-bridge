@@ -878,3 +878,21 @@ test('vscode: extension error → «Не удалось запустить: …�
     assert.ok(s.telegram.edits.some((e) => e.text === '⚠ Не запущено: alpha'));
   } finally { await s.d.close(); }
 });
+
+test('vscode: «Другая папка» with a new folder in the projects root → folder created, job dispatched', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cct-proj-'));
+  const target = path.join(root, 'fresh');
+  const s = await setup({ extra: { recentDirs: async () => [], spawnTimeoutMs: 3000, projectsRoot: root } });
+  try {
+    const poll = vpost(s, '/vscode/poll', { id: 'w', folders: [] });
+    await toFolderPicker(s, 'новый');
+    s.telegram.push(cb('f|500|o', 'cbo'));
+    await waitFor(() => s.telegram.sent.some((m) => /полный путь к папке/.test(m.text)));
+    s.telegram.push({ ...msg(target), message: { ...msg(target).message, message_id: 502 } });
+    const job = await (await poll).json();
+    assert.equal(job.cwd, target);
+    assert.ok(fs.statSync(target).isDirectory());
+    await vpost(s, '/vscode/ack', { jobId: job.id, ok: true });
+    await waitFor(() => s.telegram.edits.some((e) => e.text === '🆕 Запущено: fresh'));
+  } finally { await s.d.close(); }
+});

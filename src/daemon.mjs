@@ -17,7 +17,7 @@ import { summarize as summarizeDefault, resolveClaude } from './summary.mjs';
 import { completionText, header, esc, dialogKeyboard } from './format.mjs';
 import { restrictToUser as restrictDefault } from './acl.mjs';
 import { createVscodeBridge } from './vscode.mjs';
-import { recentDirs as recentDirsDefault, isDir as isDirDefault } from './dirs.mjs';
+import { recentDirs as recentDirsDefault, isDir as isDirDefault, PROJECTS_ROOT } from './dirs.mjs';
 
 export const EXIT_PORT_IN_USE = 1;
 export const EXIT_FATAL = 2;
@@ -69,6 +69,7 @@ export async function startDaemon({
   recentDirs,
   isDir = isDirDefault,
   spawnTimeoutMs = 10_000,
+  projectsRoot = PROJECTS_ROOT, // «Другая папка»: a missing folder directly inside it is created
 } = {}) {
   vscode = vscode ?? createVscodeBridge({ now });
   recentDirs = recentDirs ?? (async () => recentDirsDefault({ projectsDir: path.join(path.dirname(paths.root), 'projects') }));
@@ -252,6 +253,20 @@ export async function startDaemon({
   // New session in a VS Code terminal. The wait for the extension's ack runs outside the serial queue.
   function doSpawn(e) {
     const name = baseName(e.cwd);
+    if (e.create) {
+      try {
+        fs.mkdirSync(e.cwd);
+        log.info('new session: folder created', { cwd: e.cwd });
+      } catch (err) {
+        if (err?.code !== 'EEXIST') {
+          log.warn('new session: mkdir failed', { cwd: e.cwd, error: errText(err) });
+          inBackground(enqueue('spawn mkdir failed', () => send({
+            text: `⚠ Не удалось создать папку ${esc(e.cwd)}: ${esc(err?.code ?? errText(err))}`, replyTo: e.replyTo,
+          })));
+          return;
+        }
+      }
+    }
     let promptFile;
     try {
       const dir = path.join(paths.stateDir, 'spawn');
@@ -383,7 +398,7 @@ export async function startDaemon({
       return;
     }
     await pruneDead();
-    const ctx = { userId: config.userId, now: now(), isDir };
+    const ctx = { userId: config.userId, now: now(), isDir, projectsRoot };
     if (String(u.callback_query?.data ?? '').startsWith('n|')) {
       try { ctx.recentDirs = await recentDirs(); } catch (e) { log.warn('recentDirs failed', { error: errText(e) }); }
     }

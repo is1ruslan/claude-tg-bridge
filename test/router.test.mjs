@@ -692,3 +692,23 @@ test('new: after «Другая папка» a non-path text cancels the folder 
     assert.equal(h.store.pendingRoute.awaitingDir, undefined);
   }
 });
+
+test('new: missing folder directly in C:\\Projects → spawn with create:true; deeper/other paths → not found', () => {
+  const h = started();
+  const u = h.text('новый проект');
+  const [pick] = sends(h.upd(u));
+  const k = u.message.message_id;
+  ctxUpd(h, h.cb(`n|${k}`, { messageId: pick.messageId }), { recentDirs: [] });
+  const [prompt] = sends(h.upd(h.cb(`f|${k}|o`, { messageId: pick.messageId })));
+  assert.match(prompt.text, /создам/);
+  const isDir = () => false;
+  for (const p of ['C:\\Projects\\a\\b', 'D:\\Projects\\x']) {
+    const eff = ctxUpd(h, h.text(p), { isDir });
+    assert.match(sends(eff)[0].text, /Папка не найдена.*только прямо в C:\\Projects/);
+    assert.equal(ofType(eff, 'spawn').length, 0);
+  }
+  const ok = ctxUpd(h, h.text('c:/projects/test-tg'), { isDir });
+  assert.deepEqual(ofType(ok, 'spawn').map(e => [e.cwd, e.create]), [['C:\\Projects\\test-tg', true]]);
+  assert.equal(ofType(ok, 'edit')[0].text, '🆕 Создаю папку и запускаю в test-tg…');
+  assert.equal(h.store.pendingRoute, null);
+});

@@ -118,3 +118,18 @@ export function sessionPickKeyboard(items, prefix, msgKey) {
     callback_data: msgKey ? `${prefix}|${short}|${msgKey}` : `${prefix}|${short}`,
   }]);
 }
+
+export const NEW_SESSION_BTN = '➕ Новая сессия';
+
+// Session picker for plain text: live sessions (r|short|key) + «Новая сессия» (n|key).
+export function routePickKeyboard(items, msgKey) {
+  return [...sessionPickKeyboard(items, 'r', msgKey), [{ text: NEW_SESSION_BTN, callback_data: `n|${msgKey}` }]];
+}
+
+// dirs: [{ label }] -> f|key|i rows + «Другая папка» (f|key|o).
+export function folderPickKeyboard(dirs, msgKey) {
+  return [
+    ...dirs.map(({ label }, i) => [{ text: '📁 ' + label, callback_data: `f|${msgKey}|${i}` }]),
+    [{ text: '📂 Другая папка', callback_data: `f|${msgKey}|o` }],
+  ];
+}

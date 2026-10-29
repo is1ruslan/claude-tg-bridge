@@ -113,6 +113,13 @@ const msg = (text, from = USER, extra = {}) => ({
   message: { message_id: 500, from: { id: from }, chat: { id: from, type: 'private' }, text, ...extra },
 });
 const dlgOf = (send) => send.keyboard[0][0].callback_data.split('|')[1];
+// Plain text always shows the session picker now: send it, then press the session's button.
+async function pickSession(s, text) {
+  const before = s.telegram.sent.filter((m) => m.text === 'Куда отправить?').length;
+  s.telegram.push(msg(text));
+  await waitFor(() => s.telegram.sent.filter((m) => m.text === 'Куда отправить?').length > before);
+  s.telegram.push(cb(`r|${SID.slice(0, 8)}|500`, 'cbpick' + before));
+}
 
 test('daemon.json written with port, secret (32 hex), pid', async () => {
   const s = await setup();
@@ -206,7 +213,7 @@ test('dead pid is pruned before a Telegram update: session removed, nothing inje
     await s.hook('SessionStart');
     await s.d.idle();
     s.telegram.push(msg('сделай что-нибудь'));
-    await waitFor(() => s.telegram.sent.some((m) => m.text === 'Нет активных сессий'));
+    await waitFor(() => s.telegram.sent.some((m) => m.text === 'Активных сессий нет — запустить новую?'));
     assert.equal(s.inject.calls.length, 0);
     const h = await fetch(`http://127.0.0.1:${s.d.port}/health`, { headers: { 'x-cc-secret': s.dj.secret } });
     assert.deepEqual(await h.json(), { ok: true, sessions: 0 });
@@ -274,7 +281,7 @@ test('inject {ok:false} -> warning sent', async () => {
   const s = await setup({ inject: fakeInject({ ok: false, error: 'boom' }) });
   try {
     await s.hook('SessionStart');
-    s.telegram.push(msg('привет'));
+    await pickSession(s, 'привет');
     await waitFor(() => s.telegram.sent.some((m) => m.text.includes('⚠ не удалось ввести в терминал: boom')));
   } finally { await s.d.close(); }
 });
@@ -609,7 +616,7 @@ test('F2: verify timeout closes the dialog (telegram) + ⚠; instructions are no
     await s.d.idle();
     assert.equal(s.d.store.getDialog(dlg).status, 'closed');
     assert.equal(s.d.store.getDialog(dlg).closedReason, 'telegram');
-    s.telegram.push(msg('следующая задача'));
+    await pickSession(s, 'следующая задача');
     await waitFor(() => s.inject.calls.length === 2);
     assert.deepEqual(s.inject.calls[1].steps[0], { text: 'следующая задача' });
     assert.ok(!s.telegram.sent.some((m) => m.text.includes('обрабатывается')));
@@ -665,7 +672,7 @@ test('F3: dead session on a plan-feedback inject also reopens + restores the key
     await waitFor(() => s.telegram.sent.length === 1);
     const planMsg = s.telegram.sent[0];
     const dlg = dlgOf(planMsg);
-    s.telegram.push(msg('поправь шаг 2'));
+    s.telegram.push(msg('поправь шаг 2', USER, { reply_to_message: { message_id: planMsg.id } }));
     await waitFor(() => s.telegram.edits.length === 2);
     await s.d.idle();
     const restored = s.telegram.edits[1];
@@ -738,4 +745,82 @@ test('minor: uncaughtException -> logged + exit(EXIT_CRASH)', async () => {
   proc.emit('uncaughtException', new Error('kaboom'));
   assert.deepEqual(codes, [EXIT_CRASH]);
   assert.ok(log.lines.some((l) => l.level === 'error' && /kaboom/.test(JSON.stringify(l))));
+});
+
+// ---------- new session via VS Code ----------
+
+const vpost = (s, url, body) => fetch(`http://127.0.0.1:${s.d.port}${url}`, {
+  method: 'POST', headers: { 'content-type': 'application/json', 'x-cc-secret': s.dj.secret }, body: JSON.stringify(body),
+});
+const DIRS = [{ path: 'C:\\Projects\\alpha', label: 'alpha' }, { path: 'C:\\Projects\\beta', label: 'beta' }];
+
+async function toFolderPicker(s, text) {
+  s.telegram.push(msg(text));
+  await waitFor(() => s.telegram.sent.some((m) => m.text === 'Активных сессий нет — запустить новую?'));
+  s.telegram.push(cb('n|500', 'cbn'));
+  await waitFor(() => s.telegram.edits.some((e) => e.text === '📂 Где запустить новую сессию?'));
+}
+
+test('vscode: /vscode/* need the secret', async () => {
+  const s = await setup();
+  try {
+    const r = await fetch(`http://127.0.0.1:${s.d.port}/vscode/poll`, { method: 'POST', body: '{}' });
+    assert.equal(r.status, 403);
+  } finally { await s.d.close(); }
+});
+
+test('vscode: text → n| (recentDirs) → f| → job to the polling window with prompt file; ack ok → «Запущено»', async () => {
+  const s = await setup({ extra: { recentDirs: async () => DIRS, spawnTimeoutMs: 3000 } });
+  try {
+    const poll = vpost(s, '/vscode/poll', { id: 'win1', folders: ['C:\\Projects\\beta'], focusedAt: 1 });
+    await toFolderPicker(s, 'напиши "README" $HOME\nвторая строка');
+    const folderEdit = s.telegram.edits.find((e) => e.text === '📂 Где запустить новую сессию?');
+    assert.deepEqual(folderEdit.keyboard.flat().map((b) => b.callback_data), ['f|500|0', 'f|500|1', 'f|500|o']);
+    s.telegram.push(cb('f|500|1', 'cbf'));
+    const r = await poll;
+    assert.equal(r.status, 200);
+    const job = await r.json();
+    assert.equal(job.cwd, 'C:\\Projects\\beta');
+    assert.equal(job.title, '🤖 beta');
+    assert.equal(job.node, process.execPath);
+    assert.match(job.script, /newsession\.mjs$/);
+    assert.equal(fs.readFileSync(job.promptFile, 'utf8'), 'напиши "README" $HOME\nвторая строка');
+    assert.equal((await vpost(s, '/vscode/ack', { jobId: job.id, ok: true })).status, 204);
+    await waitFor(() => s.telegram.edits.some((e) => e.text === '🆕 Запущено: beta'));
+    assert.equal(s.d.store.pendingRoute, null);
+  } finally { await s.d.close(); }
+});
+
+test('vscode: no window → «VS Code не отвечает» + retry button; route restored, retry works', async () => {
+  const s = await setup({ extra: { recentDirs: async () => DIRS, spawnTimeoutMs: 200 } });
+  try {
+    await toFolderPicker(s, 'задача');
+    s.telegram.push(cb('f|500|0', 'cbf'));
+    await waitFor(() => s.telegram.sent.some((m) => /VS Code не отвечает/.test(m.text)));
+    const warn = s.telegram.sent.find((m) => /VS Code не отвечает/.test(m.text));
+    assert.deepEqual(warn.keyboard, [[{ text: '🔁 Повторить', callback_data: 'f|500|0' }]]);
+    assert.deepEqual(s.d.store.pendingRoute.folders, ['C:\\Projects\\alpha']);
+    const spawnDir = path.join(s.paths.stateDir, 'spawn');
+    assert.deepEqual(fs.existsSync(spawnDir) ? fs.readdirSync(spawnDir) : [], []);
+    // the window shows up; retry delivers the job
+    const poll = vpost(s, '/vscode/poll', { id: 'w', folders: [] });
+    await new Promise((r) => setTimeout(r, 30));
+    s.telegram.push(cb('f|500|0', 'cbr'));
+    const job = await (await poll).json();
+    assert.equal(job.cwd, 'C:\\Projects\\alpha');
+    await vpost(s, '/vscode/ack', { jobId: job.id, ok: true });
+    await waitFor(() => s.telegram.edits.some((e) => e.text === '🆕 Запущено: alpha'));
+  } finally { await s.d.close(); }
+});
+
+test('vscode: a slow spawn does not block other updates', async () => {
+  const s = await setup({ extra: { recentDirs: async () => DIRS, spawnTimeoutMs: 1500 } });
+  try {
+    const poll = vpost(s, '/vscode/poll', { id: 'w', folders: [] });
+    await toFolderPicker(s, 'задача');
+    s.telegram.push(cb('f|500|0', 'cbf'));
+    await poll; // job delivered, never acked
+    s.telegram.push(msg('/status'));
+    await waitFor(() => s.telegram.sent.some((m) => m.text === 'Активных сессий нет'), 1000);
+  } finally { await s.d.close(); }
 });

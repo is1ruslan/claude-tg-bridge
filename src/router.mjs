@@ -1,5 +1,7 @@
 // Telegram updates -> Effect[]. Mutates the Store, otherwise pure (no I/O).
-import { askText, askKeyboard, resolvedSuffix, statusText, sessionPickKeyboard, esc } from './format.mjs';
+import {
+  askText, askKeyboard, resolvedSuffix, statusText, sessionPickKeyboard, routePickKeyboard, folderPickKeyboard, esc,
+} from './format.mjs';
 import {
   askSequence, planSequence, permissionSequence, instructionSequence, stopSequence, PLAN_FEEDBACK_INDEX,
 } from './keys.mjs';
@@ -16,7 +18,7 @@ const HELP_TEXT = [
   '/help — эта справка',
   '',
   'Ответьте reply на сообщение проекта, чтобы отправить инструкцию в его сессию.',
-  'Если сессия одна — можно просто написать текст.',
+  'Сообщение без reply — выбор сессии или «➕ Новая сессия» (откроет терминал в VS Code).',
 ].join('\n');
 
 const isLive = d => !!d && (d.status === 'open' || d.status === 'injected');
@@ -93,11 +95,22 @@ function stopEffects(store, session, now) {
 }
 const ALREADY_STOPPED = 'уже остановлено';
 
+// Folder name for messages; works for both separators.
+const baseName = (p) => String(p).replace(/[\\/]+$/, '').split(/[\\/]/).pop() || String(p);
+const STALE = 'Устарело';
+
+function spawnEffects(route, cwd, pickerId) {
+  const out = [];
+  if (pickerId != null) out.push({ type: 'edit', messageId: pickerId, text: '🆕 Запускаю в ' + esc(baseName(cwd)) + '…', keyboard: null });
+  out.push({ type: 'spawn', cwd, text: route.text, replyTo: route.messageId, msgKey: String(route.messageId), pickerId: pickerId ?? null });
+  return out;
+}
+
 const pickItems = store => store.liveSessions().map(s => ({ label: store.labelOf(s.id), short: s.short }));
 
 // ---------- callbacks ----------
 
-function handleCallback(store, cq, now) {
+function handleCallback(store, cq, now, ctx) {
   const ack = (text) => (text ? { type: 'answerCallback', callbackId: cq.id, text } : { type: 'answerCallback', callbackId: cq.id });
   const parts = String(cq.data ?? '').split('|');
   const [kind] = parts;
@@ -109,9 +122,35 @@ function handleCallback(store, cq, now) {
     return stop ? [ack(), ...stop] : [ack(ALREADY_STOPPED)];
   }
 
+  if (kind === 'n' || kind === 'f') {
+    const route = store.pendingRoute;
+    if (!route || String(route.messageId) !== parts[1]) return [ack(STALE)];
+    const pickerId = cq.message?.message_id ?? route.pickerId;
+    if (kind === 'n') {
+      const dirs = ctx.recentDirs ?? [];
+      route.folders = dirs.map(d => d.path);
+      route.pickerId = pickerId;
+      route.awaitingDir = false;
+      const out = [ack()];
+      if (pickerId != null) {
+        out.push({ type: 'edit', messageId: pickerId, text: '📂 Где запустить новую сессию?', keyboard: folderPickKeyboard(dirs, parts[1]) });
+      }
+      return out;
+    }
+    if (parts[2] === 'o') {
+      route.awaitingDir = true;
+      route.pickerId = pickerId;
+      return [ack(), { type: 'send', text: '📂 Пришлите путь к папке (например C:\\Projects\\app)', forceReply: true }];
+    }
+    const cwd = route.folders?.[Number(parts[2])];
+    if (cwd == null) return [ack(STALE)];
+    store.pendingRoute = null;
+    return [ack(), ...spawnEffects(route, cwd, pickerId)];
+  }
+
   if (kind === 'r') {
     const route = store.pendingRoute;
-    if (!route || String(route.messageId) !== parts[2]) return [ack('Устарело')];
+    if (!route || String(route.messageId) !== parts[2]) return [ack(STALE)];
     const s = store.sessionByShort(parts[1]);
     if (!s) return [ack('Сессия завершена')];
     store.pendingRoute = null;
@@ -242,7 +281,7 @@ function handleCommand(store, cmd, now) {
 
 const COMMANDS = new Set(['/status', '/stop', '/help', '/start']);
 
-function handleMessage(store, msg, now) {
+function handleMessage(store, msg, now, ctx) {
   if (typeof msg.text !== 'string' || !msg.text.trim()) return [{ type: 'send', text: 'Поддерживается только текст' }];
   const text = msg.text;
 
@@ -255,6 +294,17 @@ function handleMessage(store, msg, now) {
   // (1) reply to a bound bot message
   const replyId = msg.reply_to_message?.message_id;
   const binding = replyId != null ? store.lookupMessage(replyId) : null;
+
+  // (0) folder path for «Другая папка» (plain text or a reply to the unbound path prompt)
+  const route = store.pendingRoute;
+  if (route?.awaitingDir && !binding) {
+    const dir = text.trim().replace(/^["']+|["']+$/g, '').trim();
+    if (!dir || !(ctx.isDir ?? (() => false))(dir)) {
+      return [{ type: 'send', text: '⚠ Папка не найдена — пришлите путь ещё раз', forceReply: true }];
+    }
+    store.pendingRoute = null;
+    return spawnEffects(route, dir, route.pickerId);
+  }
   if (binding) {
     const s = store.getSession(binding.sessionId);
     if (!s) return ended;
@@ -269,28 +319,30 @@ function handleMessage(store, msg, now) {
     return deliver(store, s, text, { replyTo: msg.message_id });
   }
 
-  // (3)-(5) by number of live sessions
-  const live = store.liveSessions();
-  if (live.length === 1) return deliver(store, live[0], text, { replyTo: msg.message_id });
-  if (!live.length) return [{ type: 'send', text: 'Нет активных сессий' }];
+  // (3) always ask: live sessions + «Новая сессия»
+  const items = pickItems(store);
   store.pendingRoute = { text, createdAt: now, messageId: msg.message_id };
-  return [{ type: 'send', text: 'В какую сессию отправить?', keyboard: sessionPickKeyboard(pickItems(store), 'r', String(msg.message_id)) }];
+  return [{
+    type: 'send',
+    text: items.length ? 'Куда отправить?' : 'Активных сессий нет — запустить новую?',
+    keyboard: routePickKeyboard(items, String(msg.message_id)),
+  }];
 }
 
 // ---------- entry ----------
 
-export function handleUpdate(store, update, { userId, now } = {}) {
+export function handleUpdate(store, update, { userId, now, ...ctx } = {}) {
   if (userId == null || !update) return [];
   const cq = update.callback_query;
   if (cq) {
     // RF-1: allowlist before anything else.
     if (cq.from?.id !== userId || cq.message?.chat?.type !== 'private') return [];
-    return handleCallback(store, cq, now);
+    return handleCallback(store, cq, now, ctx);
   }
   const msg = update.message;
   if (msg) {
     if (msg.from?.id !== userId || msg.chat?.type !== 'private') return [];
-    return handleMessage(store, msg, now);
+    return handleMessage(store, msg, now, ctx);
   }
   return [];
 }

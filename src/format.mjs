@@ -6,18 +6,45 @@ export const header = (label) => `📁 <b>${esc(label || 'сессия')}</b>`;
 
 const STATUS = { done: '✅ завершено', waiting: '⏸ ждёт решения', error: '❌ ошибка' };
 
+// Blocks of a message are separated by a blank line so it reads easily in Telegram.
+const blocks = (...parts) => parts.filter((p) => p != null && p !== '').join('\n\n');
+
+const LIST_ITEM = /^\s*([-•*–]|\d+[.)])\s/;
+
+// Free text (summaries): a blank line between prose lines; list items stay together,
+// and a list hangs on the line that introduces it. Runs of blank lines collapse to one.
+export function paragraphs(text) {
+  const lines = String(text ?? '').replace(/\r\n/g, '\n').split('\n').map((l) => l.trimEnd());
+  const out = [];
+  let prev = null; // previous non-empty line
+  for (const line of lines) {
+    if (!line.trim()) { prev = null; continue; }
+    if (out.length) {
+      out.push(prev != null && LIST_ITEM.test(line) ? '\n' : '\n\n');
+    }
+    out.push(line);
+    prev = line;
+  }
+  return out.join('');
+}
+
 export function completionText(label, status, summary) {
-  return `${header(label)}\nСтатус: ${STATUS[status] ?? STATUS.done}\n${esc(summary)}`;
+  return blocks(header(label), `Статус: ${STATUS[status] ?? STATUS.done}`, paragraphs(esc(summary)));
 }
 
 export function askText(label, question, qIndex, qTotal) {
   const prefix = qTotal > 1 ? `(${qIndex + 1}/${qTotal}) ` : '';
-  const lines = [header(label), `❓ ${prefix}<b>${esc(question.header)}</b>`, esc(question.question)];
-  if (question.multiSelect) lines.push('Можно выбрать несколько.');
-  (question.options ?? []).forEach((o, i) => {
-    lines.push(`${i + 1}. <b>${esc(o.label)}</b>${o.description ? ` — ${esc(o.description)}` : ''}`);
-  });
-  return lines.join('\n');
+  const options = question.options ?? [];
+  const items = options.map((o, i) => `${i + 1}. <b>${esc(o.label)}</b>${o.description ? ` — ${esc(o.description)}` : ''}`);
+  // Options with descriptions are small paragraphs; bare labels read better as a compact list.
+  const list = items.join(options.some((o) => o.description) ? '\n\n' : '\n');
+  return blocks(
+    header(label),
+    `❓ ${prefix}<b>${esc(question.header)}</b>`,
+    esc(question.question),
+    question.multiSelect ? 'Можно выбрать несколько.' : null,
+    list,
+  );
 }
 
 // selected: 0-based option indexes. callback opt is 1-based (same as the number shown).
@@ -37,7 +64,7 @@ export function askKeyboard(dlgId, qIndex, question, selected = []) {
 }
 
 export function planText(label, plan) {
-  return `${header(label)}\n📝 План на подтверждение\n${esc(plan)}`;
+  return blocks(header(label), '📝 План на подтверждение', esc(plan));
 }
 
 // Cut to at most `max` UTF-16 units without splitting a surrogate pair.
@@ -70,15 +97,15 @@ export function permText(label, toolName, toolInput) {
     lines.push(preBlock(inp.command, BASH_MAX, 'команда обрезана'));
   } else if (toolName === 'Edit' && str(inp.file_path)) {
     lines.push(`<pre>${esc(inp.file_path)}</pre>`);
-    if (str(inp.old_string)) lines.push('Было:', preBlock(inp.old_string, EDIT_MAX));
-    if (str(inp.new_string)) lines.push('Стало:', preBlock(inp.new_string, EDIT_MAX));
+    if (str(inp.old_string)) lines.push('Было:\n' + preBlock(inp.old_string, EDIT_MAX));
+    if (str(inp.new_string)) lines.push('Стало:\n' + preBlock(inp.new_string, EDIT_MAX));
   } else if (toolName === 'Write' && str(inp.file_path)) {
     lines.push(`<pre>${esc(inp.file_path)}</pre>`);
     if (str(inp.content)) lines.push(preBlock(inp.content, WRITE_MAX));
   } else {
     lines.push(preBlock(JSON.stringify(inp), OTHER_MAX));
   }
-  return lines.join('\n');
+  return blocks(...lines);
 }
 
 export function optionsKeyboard(dlgId, options) {

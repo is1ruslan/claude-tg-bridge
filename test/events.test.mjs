@@ -268,7 +268,7 @@ test('Ask from Telegram with mismatching answer → ⚠ send', () => {
   assert.equal(eff.length, 1);
   assert.equal(eff[0].type, 'send');
   assert.deepEqual(eff[0].bind, { sessionId: SID });
-  assert.equal(eff[0].text, '📁 <b>tg-spike · main</b>\n⚠ в сессию ушло «Зелёный», а не «Красный» — проверьте терминал');
+  assert.equal(eff[0].text, '📁 <b>tg-spike · main</b>\n\n⚠ в сессию ушло «Зелёный», а не «Красный» — проверьте терминал');
   assert.equal(d.closedReason, 'telegram');
 });
 

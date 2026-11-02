@@ -11,7 +11,7 @@ test('esc', () => assert.equal(F.esc('a<b>&c'), 'a&lt;b&gt;&amp;c'));
 test('header', () => assert.equal(F.header('p<1'), '📁 <b>p&lt;1</b>'));
 
 test('completionText', () => {
-  assert.equal(F.completionText('p · main', 'done', 'a<b'), '📁 <b>p · main</b>\nСтатус: ✅ завершено\na&lt;b');
+  assert.equal(F.completionText('p · main', 'done', 'a<b'), '📁 <b>p · main</b>\n\nСтатус: ✅ завершено\n\na&lt;b');
   assert.match(F.completionText('p', 'waiting', 'x'), /⏸ ждёт решения/);
   assert.match(F.completionText('p', 'error', 'x'), /❌ ошибка/);
 });
@@ -19,7 +19,7 @@ test('completionText', () => {
 test('askText single and numbering', () => {
   const q = fx('PreToolUse-Ask-single').tool_input.questions[0];
   const t = F.askText('p', q, 0, 1);
-  assert.ok(t.startsWith('📁 <b>p</b>\n❓ '));
+  assert.ok(t.startsWith('📁 <b>p</b>\n\n❓ '));
   assert.ok(t.includes('1. <b>'));
   assert.ok(!t.includes('(1/1)'));
   assert.ok(!t.includes('Можно выбрать несколько.'));
@@ -60,7 +60,7 @@ test('askKeyboard multi', () => {
 
 test('planText', () => {
   const t = F.planText('p', 'step <1>\nstep 2');
-  assert.equal(t, '📁 <b>p</b>\n📝 План на подтверждение\nstep &lt;1&gt;\nstep 2');
+  assert.equal(t, '📁 <b>p</b>\n\n📝 План на подтверждение\n\nstep &lt;1&gt;\nstep 2');
   assert.ok(!t.includes('<pre>'));
 });
 
@@ -169,4 +169,28 @@ test('F10: Write shows file_path + content preview ≤ 1200 with note; others JS
   assert.ok(o.includes(`<pre>${F.esc(json.slice(0, 1500))}</pre>\n${NOTE(json.length)}`));
   const small = F.permText('p', 'Other', { a: 1 });
   assert.ok(small.includes('<pre>{"a":1}</pre>') && !small.includes('⚠'));
+});
+
+test('paragraphs: blank line between prose lines, lists stay compact, existing blanks kept', () => {
+  assert.equal(F.paragraphs('Сделано А.\nОсталось Б.'), 'Сделано А.\n\nОсталось Б.');
+  assert.equal(F.paragraphs('Варианты:\n1. раз\n2. два\n- три\nИтог.'), 'Варианты:\n1. раз\n2. два\n- три\n\nИтог.');
+  assert.equal(F.paragraphs('a\n\n\n\nb'), 'a\n\nb');
+  assert.equal(F.paragraphs(''), '');
+});
+
+test('completionText: summary lines become paragraphs', () => {
+  const t = F.completionText('p', 'waiting', 'Сделал X.\nНужно решить Y.\n1. да\n2. нет');
+  assert.equal(t, '📁 <b>p</b>\n\nСтатус: ⏸ ждёт решения\n\nСделал X.\n\nНужно решить Y.\n1. да\n2. нет');
+});
+
+test('askText: blocks separated by blank lines; options with descriptions spaced, plain options compact', () => {
+  const t = F.askText('p', { header: 'H', question: 'Q?', options: [{ label: 'a', description: 'da' }, { label: 'b', description: 'db' }] }, 0, 1);
+  assert.equal(t, '📁 <b>p</b>\n\n❓ <b>H</b>\n\nQ?\n\n1. <b>a</b> — da\n\n2. <b>b</b> — db');
+  const t2 = F.askText('p', { header: 'H', question: 'Q?', options: [{ label: 'a' }, { label: 'b' }] }, 0, 1);
+  assert.ok(t2.endsWith('Q?\n\n1. <b>a</b>\n2. <b>b</b>'));
+});
+
+test('permText: blocks separated by blank lines, label stays with its block', () => {
+  const t = F.permText('p', 'Edit', { file_path: 'f.js', old_string: 'a', new_string: 'b' });
+  assert.equal(t, '📁 <b>p</b>\n\n🔐 Разрешение: <b>Edit</b>\n\n<pre>f.js</pre>\n\nБыло:\n<pre>a</pre>\n\nСтало:\n<pre>b</pre>');
 });

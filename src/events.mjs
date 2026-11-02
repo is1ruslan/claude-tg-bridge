@@ -77,7 +77,7 @@ function mismatchEffects(store, dialog, payload) {
     if (actual === undefined || actual === expected) return;
     out.push({
       type: 'send',
-      text: `${header(store.labelOf(dialog.sessionId))}\n⚠ в сессию ушло «${esc(actual)}», а не «${esc(expected)}» — проверьте терминал`,
+      text: `${header(store.labelOf(dialog.sessionId))}\n\n⚠ в сессию ушло «${esc(actual)}», а не «${esc(expected)}» — проверьте терминал`,
       bind: { sessionId: dialog.sessionId },
     });
   });
@@ -200,7 +200,7 @@ export function handleHookEvent(store, ev, now) {
         d.feedbackWarned = true;
         approvedInstead.push({
           type: 'send',
-          text: `${header(label())}\n⚠ план был одобрен вместо отправки правок — проверьте терминал`,
+          text: `${header(label())}\n\n⚠ план был одобрен вместо отправки правок — проверьте терминал`,
           bind: { sessionId: sid },
         });
       }

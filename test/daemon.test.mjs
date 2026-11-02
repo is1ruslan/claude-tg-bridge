@@ -711,7 +711,7 @@ test('F4: a slow summarize does not delay the effects of a subsequent update', a
     assert.match(s.telegram.sent[0].text, /tg-spike/);
     release();
     await waitFor(() => s.telegram.sent.length === 2);
-    assert.match(s.telegram.sent[1].text, /Статус: ✅ завершено\noops$/);
+    assert.match(s.telegram.sent[1].text, /Статус: ✅ завершено\n\noops$/);
     await s.d.idle();
     assert.deepEqual(s.d.store.lookupMessage(s.telegram.sent[1].id), { sessionId: SID });
   } finally { await s.d.close(); }

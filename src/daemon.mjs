@@ -209,8 +209,7 @@ export async function startDaemon({
       log.warn('inject dropped: process list unavailable', { session: session.short, pid });
       await reopenDialog(e);
       await send({
-        text: `${header(labelOf(e.sessionId))}
-⚠ не удалось проверить процесс сессии, ответьте в терминале`,
+        text: `${header(labelOf(e.sessionId))}\n\n⚠ не удалось проверить процесс сессии, ответьте в терминале`,
         bind: { sessionId: e.sessionId },
       });
       return;
@@ -226,7 +225,7 @@ export async function startDaemon({
       log.warn('inject failed', { session: session.short, error: r?.error });
       await reopenDialog(e);
       await send({
-        text: `${header(labelOf(e.sessionId))}\n⚠ не удалось ввести в терминал: ${esc(r?.error ?? 'неизвестная ошибка')}`,
+        text: `${header(labelOf(e.sessionId))}\n\n⚠ не удалось ввести в терминал: ${esc(r?.error ?? 'неизвестная ошибка')}`,
         bind: { sessionId: e.sessionId },
       });
       return;
@@ -243,7 +242,7 @@ export async function startDaemon({
           ? '⚠ ответ на разрешение не подтверждён за 2 мин — проверьте терминал'
           : '⚠ не удалось подтвердить ответ — проверьте терминал';
         await send({
-          text: `${header(labelOf(e.sessionId) || label)}\n${warn}`,
+          text: `${header(labelOf(e.sessionId) || label)}\n\n${warn}`,
           bind: store.getSession(e.sessionId) ? { sessionId: e.sessionId } : undefined,
         });
       }));

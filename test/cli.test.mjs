@@ -33,7 +33,10 @@ test('install: writes env, launcher, hooks, task; no start when env empty', asyn
   const { home, d, calls } = setup({ settings: JSON.stringify({ effortLevel: 'high' }) });
   assert.equal(await run(['install'], d), 0);
   const root = path.join(home, '.claude', 'telegram');
-  assert.match(fs.readFileSync(path.join(root, '.env'), 'utf8'), /TELEGRAM_BOT_TOKEN=\nTELEGRAM_USER_ID=\n/);
+  const envText = fs.readFileSync(path.join(root, '.env'), 'utf8');
+  assert.match(envText, /^TELEGRAM_BOT_TOKEN=$/m);
+  assert.match(envText, /^TELEGRAM_USER_ID=$/m);
+  assert.match(envText, /^CC_TG_LANG=en$/m);
   assert.ok(fs.existsSync(path.join(root, 'state')) && fs.existsSync(path.join(root, 'logs')));
   const vbs = fs.readFileSync(path.join(root, 'launch.vbs'), 'utf8');
   assert.ok(!vbs.includes('__REPO__') && vbs.includes('C:/node/node.exe'));
@@ -96,7 +99,7 @@ test('install: builds the .vsix and installs it via code; failure is reported, i
   const f = setup();
   f.d.exec = async (cmd, args) => (cmd === 'cmd.exe' ? { code: 1, stdout: '', stderr: "'code' is not recognized" } : { code: 0, stdout: '', stderr: '' });
   assert.equal(await run(['install'], f.d), 0);
-  assert.ok(f.lines.some((l) => /расширение VS Code не установлено: 'code' is not recognized/.test(l)));
+  assert.ok(f.lines.some((l) => /VS Code extension not installed: 'code' is not recognized/.test(l)));
   assert.ok(fs.existsSync(path.join(f.home, '.claude', 'settings.json')));
 });
 
@@ -142,7 +145,7 @@ test('status uses /health with secret header and never prints secrets', async ()
   await run(['status'], d);
   assert.equal(seen.url, 'http://127.0.0.1:5555/health');
   assert.equal(seen.h['x-cc-secret'], 'topsecret');
-  assert.ok(lines.join('\n').includes('сессий: 2'));
+  assert.ok(lines.join('\n').includes('sessions: 2'));
   assert.ok(!lines.join('\n').includes('topsecret'));
 });
 
@@ -157,7 +160,7 @@ test('logs tails n lines; test sends message; unknown command fails', async () =
   let sent;
   d.createTelegram = () => ({ sendMessage: async (m) => { sent = m; } });
   assert.equal(await run(['test'], d), 0);
-  assert.deepEqual(sent, { chatId: 42, text: '🔔 cc-telegram: проверка связи' });
+  assert.deepEqual(sent, { chatId: 42, text: '🔔 claude-tg-bridge: connection test' });
   assert.equal(await run(['nope'], d), 1);
 });
 
@@ -192,7 +195,7 @@ test('stop: no /health but node.exe pid -> not killed, daemon.json kept', async 
   await run(['stop'], d);
   assert.equal(calls.length, 0);
   assert.ok(fs.existsSync(json));
-  assert.ok(lines.join('\n').includes('завершите вручную'));
+  assert.ok(lines.join('\n').includes('end it by hand'));
 });
 
 test('stop: taskkill failure keeps daemon.json', async () => {
@@ -207,7 +210,7 @@ test('stop: taskkill failure keeps daemon.json', async () => {
 test('settings write: unique backup names, no tmp left, uninstall no-op skips write', async () => {
   const { home, d } = setup({ settings: JSON.stringify({ a: 1 }) });
   await run(['install'], d);
-  await run(['install'], d);
+  await run(['install', '--plugin'], d); // hooks removed -> second write, second backup
   const dir = path.join(home, '.claude');
   const files = fs.readdirSync(dir);
   assert.equal(files.filter((f) => f.startsWith('settings.json.bak-')).length, 2);
@@ -298,7 +301,7 @@ test('F8: task step fails -> settings.json untouched, error + retry hint (admin)
   assert.ok(!fs.readdirSync(path.join(s.home, '.claude')).some((f) => f.startsWith('settings.json.bak')));
   const text = s.lines.join('\n');
   assert.match(text, /Access is denied/);
-  assert.match(text, /запустите терминал от администратора, если отказано в доступе/);
+  assert.match(text, /run the terminal as administrator if access is denied/);
   assert.match(text, /node src\/cli\.mjs install/);
   assert.ok(!s.calls.some((c) => c[1] === '/Run'));
 });
@@ -317,4 +320,62 @@ test('restart ends the lingering task instance before /Run (IgnoreNew would drop
   const i = calls.findIndex((c) => c[0] === 'schtasks' && c[1] === '/End');
   const j = calls.findIndex((c) => c[0] === 'schtasks' && c[1] === '/Run');
   assert.ok(i >= 0 && j > i, JSON.stringify(calls));
+});
+
+test('install copies the runtime to ~/.claude/telegram/app; launcher, hooks and extension point there', async () => {
+  const { home, d } = setup({ settings: JSON.stringify({}) });
+  let built;
+  d.buildNative = async (out) => { built = out; return out; };
+  let vsixOpts;
+  d.buildVsix = (ext, out, opts) => { vsixOpts = { ext, opts }; fs.writeFileSync(out, 'x'); };
+  assert.equal(await run(['install'], d), 0);
+  const app = path.join(home, '.claude', 'telegram', 'app');
+  for (const f of ['src/daemon.mjs', 'src/hook.mjs', 'native/inject.cs', 'scripts/launch.vbs', 'vscode-ext/extension.js', 'package.json']) {
+    assert.ok(fs.existsSync(path.join(app, f)), f);
+  }
+  assert.ok(!fs.existsSync(path.join(app, 'test')) && !fs.existsSync(path.join(app, 'native', 'inject.exe')));
+  assert.equal(built, path.join(app, 'native', 'inject.exe'));
+  assert.ok(fs.readFileSync(path.join(home, '.claude', 'telegram', 'launch.vbs'), 'utf8').includes(path.join(app, 'src', 'supervisor.mjs')));
+  const s = JSON.parse(fs.readFileSync(path.join(home, '.claude', 'settings.json'), 'utf8'));
+  assert.ok(s.hooks.Stop[0].hooks[0].command.includes(app.split(path.sep).join('/') + '/src/hook.mjs'));
+  assert.equal(vsixOpts.ext, path.join(app, 'vscode-ext'));
+  assert.equal(vsixOpts.opts.script, path.join(app, 'src', 'newsession.mjs'));
+  // a stale file from an older version disappears on update
+  fs.writeFileSync(path.join(app, 'src', 'old.mjs'), '');
+  assert.equal(await run(['install'], d), 0);
+  assert.ok(!fs.existsSync(path.join(app, 'src', 'old.mjs')));
+  // uninstall removes the app copy but keeps .env
+  assert.equal(await run(['uninstall'], d), 0);
+  assert.ok(!fs.existsSync(app));
+  assert.ok(fs.existsSync(path.join(home, '.claude', 'telegram', '.env')));
+});
+
+test('plugin mode (--plugin or the plugin enabled in settings.json): no hooks in settings.json, old ones removed', async () => {
+  const { home, d, lines } = setup({ settings: JSON.stringify({ effortLevel: 'high' }) });
+  assert.equal(await run(['install'], d), 0);
+  const file = path.join(home, '.claude', 'settings.json');
+  assert.ok(JSON.parse(fs.readFileSync(file, 'utf8')).hooks);
+  assert.equal(await run(['install', '--plugin'], d), 0);
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { effortLevel: 'high' });
+  assert.ok(lines.some((l) => /hooks: provided by the claude-tg-bridge plugin/.test(l)));
+  const enabled = { enabledPlugins: { 'claude-tg-bridge@claude-tg-bridge': true } };
+  fs.writeFileSync(file, JSON.stringify(enabled));
+  assert.equal(await run(['install'], d), 0);
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), enabled);
+});
+
+test('install over a running daemon stops it (and ends the task) before replacing the app, then starts it', async () => {
+  const { home, d, calls } = setup();
+  const root = path.join(home, '.claude', 'telegram');
+  fs.mkdirSync(path.join(root, 'state'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'state', 'daemon.json'), JSON.stringify({ port: 1, secret: 's', pid: 200 }));
+  fs.writeFileSync(path.join(root, '.env'), 'TELEGRAM_BOT_TOKEN=123456:abcdef\nTELEGRAM_USER_ID=42\n');
+  d.fetch = async () => ({ ok: true, json: async () => ({ ok: true, sessions: 0 }) });
+  d.listProcs = async () => new Map([[200, { name: 'node.exe', ppid: 1 }]]);
+  assert.equal(await run(['install'], d), 0);
+  const kill = calls.findIndex((c) => c[0] === 'taskkill');
+  const end = calls.findIndex((c) => c[0] === 'schtasks' && c[1] === '/End');
+  const create = calls.findIndex((c) => c[0] === 'schtasks' && c[1] === '/Create');
+  const start = calls.findIndex((c) => c[0] === 'schtasks' && c[1] === '/Run');
+  assert.ok(kill >= 0 && kill < end && end < create && create < start, JSON.stringify(calls));
 });

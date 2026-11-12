@@ -3,8 +3,12 @@ import { spawnSync as nodeSpawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { paths } from './config.mjs';
 
-export const INJECT_EXE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'native', 'inject.exe');
+// Next to this file in the installed app copy; the plugin's own folder has no built exe,
+// so hooks running from the plugin use the app copy's one.
+const LOCAL_EXE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'native', 'inject.exe');
+export const INJECT_EXE = fs.existsSync(LOCAL_EXE) ? LOCAL_EXE : path.join(paths().app, 'native', 'inject.exe');
 export const ANCESTOR_TIMEOUT_MS = 800;
 export const MAX_STRING = 4000;
 export const LOG_CAP_BYTES = 256 * 1024;

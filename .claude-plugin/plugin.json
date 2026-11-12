@@ -1,0 +1,13 @@
+{
+  "name": "claude-tg-bridge",
+  "description": "Telegram bridge for Claude Code (Windows): task summaries, questions with inline buttons, permission prompts, instructions and new sessions from a private bot",
+  "version": "0.1.0",
+  "author": {
+    "name": "is1ruslan",
+    "url": "https://github.com/is1ruslan"
+  },
+  "homepage": "https://github.com/is1ruslan/claude-tg-bridge",
+  "repository": "https://github.com/is1ruslan/claude-tg-bridge",
+  "license": "MIT",
+  "keywords": ["telegram", "notifications", "remote-control", "windows", "hooks"]
+}

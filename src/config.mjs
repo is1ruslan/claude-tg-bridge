@@ -8,6 +8,7 @@ export function paths(home = os.homedir()) {
   const stateDir = path.join(root, 'state');
   return {
     root,
+    app: path.join(root, 'app'), // installed copy of the runtime (cli install)
     env: path.join(root, '.env'),
     stateDir,
     logsDir: path.join(root, 'logs'),

@@ -1,11 +1,12 @@
 // Keystroke sequences for Claude Code dialogs. Source of truth: docs/ui-keymap.md.
 // Pure module: every function returns Step[] ({text}|{key}|{sleep}).
+import { t } from './i18n.mjs';
 
 const DOWN = { key: 'DOWN' };
 const ENTER = { key: 'ENTER' };
 const TAB_SLEEP = () => ({ sleep: 400 });
 
-export const PLAN_OPTIONS = ['✅ Да, auto mode', '✅ Да, правки вручную', '✏️ Изменить план'];
+export const planOptions = () => [...t('planOptions')];
 export const PLAN_FEEDBACK_INDEX = 2;
 
 const downs = (n) => Array.from({ length: n }, () => DOWN);
@@ -20,14 +21,14 @@ function ruleLabel(s) {
 }
 
 export function describeSuggestion(s) {
-  if (s && s.type === 'setMode' && s.mode) return `✅ Да + режим ${s.mode}`;
+  if (s && s.type === 'setMode' && s.mode) return t('permMode', s.mode);
   const label = ruleLabel(s);
-  if (label) return `✅ Да + не спрашивать: ${label}`;
-  return '✅ Да + запомнить';
+  if (label) return t('permRule', label);
+  return t('permRemember');
 }
 
 export function permissionOptions(permission_suggestions = []) {
-  return ['✅ Да', ...permission_suggestions.map(describeSuggestion), '⛔ Нет'];
+  return [t('permYes'), ...permission_suggestions.map(describeSuggestion), t('permNo')];
 }
 
 export const permissionSequence = (k) => [{ text: String(k + 1) }];

@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { normLang } from './i18n.mjs';
 
 export function paths(home = os.homedir()) {
   const root = path.join(home, '.claude', 'telegram');
@@ -43,6 +44,9 @@ export function loadConfig(home, procEnv = process.env) {
     token: pick('TELEGRAM_BOT_TOKEN'),
     userId: pick('TELEGRAM_USER_ID') !== '' && Number.isInteger(uid) ? uid : null,
     port: Number.isInteger(port) && port > 0 && port < 65536 ? port : 47833,
+    lang: normLang(pick('CC_TG_LANG')),
+    // «Other folder»: a missing folder directly inside it is created
+    projectsDir: pick('CC_TG_PROJECTS_DIR') || path.join(home ?? os.homedir(), 'Projects'),
   };
 }
 

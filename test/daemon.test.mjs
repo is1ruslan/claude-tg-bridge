@@ -11,6 +11,9 @@ import { paths as mkPaths } from '../src/config.mjs';
 import { TelegramError } from '../src/telegram.mjs';
 import { PLAN_FEEDBACK_INDEX } from '../src/keys.mjs';
 import { isClaudeAlive as realIsClaudeAlive } from '../src/procs.mjs';
+import { setLang } from '../src/i18n.mjs';
+
+setLang('ru'); // these tests assert the Russian UI texts
 
 const FIX = new URL('./fixtures/hooks/', import.meta.url);
 const fx = (name, patch = {}) => ({ ...JSON.parse(fs.readFileSync(new URL(`${name}.json`, FIX), 'utf8')), ...patch });

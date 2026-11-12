@@ -5,6 +5,9 @@ import { Store } from '../src/sessions.mjs';
 import { handleHookEvent } from '../src/events.mjs';
 import { handleUpdate } from '../src/router.mjs';
 import { PLAN_FEEDBACK_INDEX } from '../src/keys.mjs';
+import { setLang } from '../src/i18n.mjs';
+
+setLang('ru'); // these tests assert the Russian UI texts
 
 const FIX = new URL('./fixtures/hooks/', import.meta.url);
 const fx = (name, patch = {}) => ({ ...JSON.parse(readFileSync(new URL(`${name}.json`, FIX), 'utf8')), ...patch });
@@ -468,9 +471,9 @@ test('/stop with one session → inject ESC + "Остановлено"', () => {
   assert.equal(sends(eff)[0].text, '⏹ Остановлено: ' + h.store.labelOf(SID));
 });
 
-test('/stop with 0 sessions → "Нет активных сессий"', () => {
+test('/stop with 0 sessions → "Активных сессий нет"', () => {
   const h = harness();
-  assert.deepEqual(h.upd(h.text('/stop')).map(e => e.text), ['Нет активных сессий']);
+  assert.deepEqual(h.upd(h.text('/stop')).map(e => e.text), ['Активных сессий нет']);
 });
 
 test('/stop with two sessions → picker; x| → ESC into chosen', () => {
@@ -702,12 +705,13 @@ test('new: missing folder directly in C:\\Projects → spawn with create:true; d
   const [prompt] = sends(h.upd(h.cb(`f|${k}|o`, { messageId: pick.messageId })));
   assert.match(prompt.text, /создам/);
   const isDir = () => false;
+  const projectsRoot = 'C:\\Projects';
   for (const p of ['C:\\Projects\\a\\b', 'D:\\Projects\\x']) {
-    const eff = ctxUpd(h, h.text(p), { isDir });
+    const eff = ctxUpd(h, h.text(p), { isDir, projectsRoot });
     assert.match(sends(eff)[0].text, /Папка не найдена.*только прямо в C:\\Projects/);
     assert.equal(ofType(eff, 'spawn').length, 0);
   }
-  const ok = ctxUpd(h, h.text('c:/projects/test-tg'), { isDir });
+  const ok = ctxUpd(h, h.text('c:/projects/test-tg'), { isDir, projectsRoot });
   assert.deepEqual(ofType(ok, 'spawn').map(e => [e.cwd, e.create]), [['C:\\Projects\\test-tg', true]]);
   assert.equal(ofType(ok, 'edit')[0].text, '🆕 Создаю папку и запускаю в test-tg…');
   assert.equal(h.store.pendingRoute, null);

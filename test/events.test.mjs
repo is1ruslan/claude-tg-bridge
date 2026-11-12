@@ -268,7 +268,7 @@ test('Ask from Telegram with mismatching answer → ⚠ send', () => {
   assert.equal(eff.length, 1);
   assert.equal(eff[0].type, 'send');
   assert.deepEqual(eff[0].bind, { sessionId: SID });
-  assert.equal(eff[0].text, '📁 <b>tg-spike · main</b>\n⚠ в сессию ушло «Зелёный», а не «Красный» — проверьте терминал');
+  assert.equal(eff[0].text, '📁 <b>tg-spike · main</b>\n\n⚠ в сессию ушло «Зелёный», а не «Красный» — проверьте терминал');
   assert.equal(d.closedReason, 'telegram');
 });
 
@@ -387,26 +387,22 @@ test('long dialog text → keyboard-only edit + reply send with suffix', () => {
   assert.equal(eff[1].replyTo, send.messageId);
 });
 
-test('Stop 30 s after UserPromptSubmit → no completion; 61 s → completion', () => {
+test('Stop 1 s after UserPromptSubmit → completion', () => {
   const h = started();
   h.run('UserPromptSubmit', { at: T0 });
-  assert.deepEqual(h.run('Stop', { at: T0 + 30000 }), []);
-  assert.equal(h.store.getSession(SID).state, 'idle');
-  h.run('UserPromptSubmit', { at: T0 + 100000 });
-  const eff = h.run('Stop', { at: T0 + 161000 });
+  const eff = h.run('Stop', { at: T0 + 1000 });
   assert.deepEqual(eff, [{
     type: 'completion', sessionId: SID, lastMessage: fx('Stop').last_assistant_message, failed: false,
   }]);
+  assert.equal(h.store.getSession(SID).state, 'idle');
 });
 
-test('Stop exactly at 60000 ms → completion; Stop without prompt → none', () => {
+test('Stop without prompt → none', () => {
   const h = started();
   assert.deepEqual(h.run('Stop', { at: T0 + 999999 }), []);
-  h.run('UserPromptSubmit', { at: T0 });
-  assert.equal(h.run('Stop', { at: T0 + 60000 }).length, 1);
 });
 
-test('StopFailure → completion failed regardless of threshold', () => {
+test('StopFailure → completion failed', () => {
   const h = started();
   h.run('UserPromptSubmit', { at: T0 });
   const payload = { ...fx('Stop'), hook_event_name: 'StopFailure', error: 'rate_limit' };

@@ -4,7 +4,6 @@ import { PLAN_OPTIONS, permissionOptions } from './keys.mjs';
 import { projectName } from './procs.mjs';
 
 const MAX_EDIT_TEXT = 3900;
-const COMPLETION_THRESHOLD_MS = 60000;
 const DIALOG_TOOLS = new Set(['AskUserQuestion', 'ExitPlanMode']);
 
 const isLive = d => d.status === 'open' || d.status === 'injected';
@@ -77,7 +76,7 @@ function mismatchEffects(store, dialog, payload) {
     if (actual === undefined || actual === expected) return;
     out.push({
       type: 'send',
-      text: `${header(store.labelOf(dialog.sessionId))}\n⚠ в сессию ушло «${esc(actual)}», а не «${esc(expected)}» — проверьте терминал`,
+      text: `${header(store.labelOf(dialog.sessionId))}\n\n⚠ в сессию ушло «${esc(actual)}», а не «${esc(expected)}» — проверьте терминал`,
       bind: { sessionId: dialog.sessionId },
     });
   });
@@ -200,7 +199,7 @@ export function handleHookEvent(store, ev, now) {
         d.feedbackWarned = true;
         approvedInstead.push({
           type: 'send',
-          text: `${header(label())}\n⚠ план был одобрен вместо отправки правок — проверьте терминал`,
+          text: `${header(label())}\n\n⚠ план был одобрен вместо отправки правок — проверьте терминал`,
           bind: { sessionId: sid },
         });
       }
@@ -221,7 +220,7 @@ export function handleHookEvent(store, ev, now) {
       session.state = 'idle';
       if (event === 'StopFailure') {
         out.push({ type: 'completion', sessionId: sid, lastMessage: payload.last_assistant_message ?? payload.error ?? '', failed: true });
-      } else if (session.lastPromptAt != null && now - session.lastPromptAt >= COMPLETION_THRESHOLD_MS) {
+      } else if (session.lastPromptAt != null) {
         out.push({ type: 'completion', sessionId: sid, lastMessage: payload.last_assistant_message ?? '', failed: false });
       }
       return out;

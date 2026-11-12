@@ -16,6 +16,8 @@ import { handleUpdate } from './router.mjs';
 import { summarize as summarizeDefault, resolveClaude } from './summary.mjs';
 import { completionText, header, esc, dialogKeyboard } from './format.mjs';
 import { restrictToUser as restrictDefault } from './acl.mjs';
+import { createVscodeBridge } from './vscode.mjs';
+import { recentDirs as recentDirsDefault, isDir as isDirDefault, PROJECTS_ROOT } from './dirs.mjs';
 
 export const EXIT_PORT_IN_USE = 1;
 export const EXIT_FATAL = 2;
@@ -29,6 +31,8 @@ const BRANCH_EVENTS = new Set(['SessionStart', 'UserPromptSubmit']);
 const ANCESTOR_RETRY_MS = 60_000;
 const MAX_EDIT_TEXT = 3900;
 const RETRY_NOTE = '⚠ не удалось ввести — выберите снова';
+const VSCODE_POLL_MS = 25_000;
+const baseName = (p) => String(p).replace(/[\\/]+$/, '').split(/[\\/]/).pop() || String(p);
 
 const errText = (e) => String(e?.message ?? e);
 
@@ -61,7 +65,14 @@ export async function startDaemon({
   pruneIntervalMs = 30_000,
   snapshotDebounceMs = 500,
   verifyTimeoutMs, // test override for verify.timeoutMs
+  vscode,
+  recentDirs,
+  isDir = isDirDefault,
+  spawnTimeoutMs = 10_000,
+  projectsRoot = PROJECTS_ROOT, // «Другая папка»: a missing folder directly inside it is created
 } = {}) {
+  vscode = vscode ?? createVscodeBridge({ now });
+  recentDirs = recentDirs ?? (async () => recentDirsDefault({ projectsDir: path.join(path.dirname(paths.root), 'projects') }));
   log = log ?? createLogger({ dir: paths.logsDir, secrets: [config?.token, secret] });
 
   if (!config?.token || config.userId == null) {
@@ -198,8 +209,7 @@ export async function startDaemon({
       log.warn('inject dropped: process list unavailable', { session: session.short, pid });
       await reopenDialog(e);
       await send({
-        text: `${header(labelOf(e.sessionId))}
-⚠ не удалось проверить процесс сессии, ответьте в терминале`,
+        text: `${header(labelOf(e.sessionId))}\n\n⚠ не удалось проверить процесс сессии, ответьте в терминале`,
         bind: { sessionId: e.sessionId },
       });
       return;
@@ -215,7 +225,7 @@ export async function startDaemon({
       log.warn('inject failed', { session: session.short, error: r?.error });
       await reopenDialog(e);
       await send({
-        text: `${header(labelOf(e.sessionId))}\n⚠ не удалось ввести в терминал: ${esc(r?.error ?? 'неизвестная ошибка')}`,
+        text: `${header(labelOf(e.sessionId))}\n\n⚠ не удалось ввести в терминал: ${esc(r?.error ?? 'неизвестная ошибка')}`,
         bind: { sessionId: e.sessionId },
       });
       return;
@@ -232,15 +242,77 @@ export async function startDaemon({
           ? '⚠ ответ на разрешение не подтверждён за 2 мин — проверьте терминал'
           : '⚠ не удалось подтвердить ответ — проверьте терминал';
         await send({
-          text: `${header(labelOf(e.sessionId) || label)}\n${warn}`,
+          text: `${header(labelOf(e.sessionId) || label)}\n\n${warn}`,
           bind: store.getSession(e.sessionId) ? { sessionId: e.sessionId } : undefined,
         });
       }));
     }
   }
 
+  // New session in a VS Code terminal. The wait for the extension's ack runs outside the serial queue.
+  function doSpawn(e) {
+    const name = baseName(e.cwd);
+    if (e.create) {
+      try {
+        fs.mkdirSync(e.cwd);
+        log.info('new session: folder created', { cwd: e.cwd });
+      } catch (err) {
+        if (err?.code !== 'EEXIST') {
+          log.warn('new session: mkdir failed', { cwd: e.cwd, error: errText(err) });
+          inBackground(enqueue('spawn mkdir failed', () => send({
+            text: `⚠ Не удалось создать папку ${esc(e.cwd)}: ${esc(err?.code ?? errText(err))}`, replyTo: e.replyTo,
+          })));
+          return;
+        }
+      }
+    }
+    let promptFile;
+    try {
+      const dir = path.join(paths.stateDir, 'spawn');
+      fs.mkdirSync(dir, { recursive: true });
+      promptFile = path.join(dir, randomBytes(8).toString('hex') + '.txt');
+      fs.writeFileSync(promptFile, e.text ?? '');
+    } catch (err) {
+      log.error('spawn: prompt file write failed', { error: errText(err) });
+      promptFile = null;
+    }
+    // node/newsession.mjs paths are baked into the extension at install time, never sent over HTTP.
+    const job = { cwd: e.cwd, title: '🤖 ' + name, promptFile };
+    const pending = promptFile
+      ? vscode.dispatch(job, { timeoutMs: spawnTimeoutMs })
+      : Promise.resolve({ ok: false, error: 'prompt-file' });
+    inBackground(pending.then((r) => enqueue('spawn result', async () => {
+      if (r.ok) {
+        log.info('new session started in VS Code', { cwd: e.cwd });
+        const text = '🆕 Запущено: ' + esc(name);
+        if (e.pickerId != null) await telegram.editMessage({ chatId, messageId: e.pickerId, text, keyboard: null });
+        else await send({ text, replyTo: e.replyTo });
+        return;
+      }
+      log.warn('new session not started', { cwd: e.cwd, error: r.error });
+      if (promptFile) fs.rmSync(promptFile, { force: true });
+      if (e.pickerId != null) {
+        await telegram.editMessage({ chatId, messageId: e.pickerId, text: '⚠ Не запущено: ' + esc(name), keyboard: null })
+          .catch((err) => log.warn('picker edit failed', { error: errText(err) }));
+      }
+      const noAnswer = r.error === 'timeout' || r.error === 'no-window';
+      const text = noAnswer
+        ? '⚠ VS Code не отвечает — сессия не создана'
+        : `⚠ Не удалось запустить сессию: ${esc(r.error ?? 'ошибка')}`;
+      // The text is not lost: restore the route so «Повторить» (f|key|0) spawns again —
+      // unless the user has sent a newer message meanwhile (its picker must keep working).
+      if (store.pendingRoute == null) {
+        store.pendingRoute = { text: e.text, createdAt: now(), messageId: e.replyTo, folders: [e.cwd], pickerId: e.pickerId ?? undefined };
+        await send({ text, keyboard: [[{ text: '🔁 Повторить', callback_data: `f|${e.msgKey}|0` }]] });
+      } else {
+        await send({ text, replyTo: e.replyTo });
+      }
+    })));
+  }
+
   async function runEffect(e) {
     switch (e.type) {
+      case 'spawn': doSpawn(e); return;
       case 'send': await send(e); return;
       case 'edit':
         if (e.text === null) await telegram.editMarkup({ chatId, messageId: e.messageId, keyboard: e.keyboard });
@@ -325,7 +397,11 @@ export async function startDaemon({
       return;
     }
     await pruneDead();
-    await runEffects(handleUpdate(store, u, { userId: config.userId, now: now() }));
+    const ctx = { userId: config.userId, now: now(), isDir, projectsRoot };
+    if (String(u.callback_query?.data ?? '').startsWith('n|')) {
+      try { ctx.recentDirs = await recentDirs(); } catch (e) { log.warn('recentDirs failed', { error: errText(e) }); }
+    }
+    await runEffects(handleUpdate(store, u, ctx));
   }
 
   let offset = 0;
@@ -375,7 +451,51 @@ export async function startDaemon({
       res.end(JSON.stringify({ ok: true, sessions: store.sessions.size }));
       return;
     }
-    if (req.method !== 'POST' || url !== '/event') {
+    const routes = {
+      '/event': (body) => {
+        res.statusCode = 204;
+        res.end();
+        if (body === undefined) { log.warn('hook event: invalid JSON'); return; }
+        enqueue(`hook ${body?.event}`, () => onHookEvent(body));
+      },
+      // VS Code extension: long poll for a job (200 + job JSON, or 204 when none).
+      '/vscode/poll': (body) => {
+        const win = body ?? {};
+        let closed = false;
+        // Closed before we answered (window reloaded/closed): the window is gone until it polls again.
+        res.on('close', () => {
+          if (res.writableFinished) return;
+          closed = true;
+          vscode.cancel(win.id);
+        });
+        vscode.poll(win, { timeoutMs: VSCODE_POLL_MS }).then((job) => {
+          if (closed) {
+            if (job) vscode.redeliver(job, win.id);
+            return;
+          }
+          if (!job) { res.statusCode = 204; res.end(); return; }
+          res.setHeader('content-type', 'application/json');
+          res.end(JSON.stringify(job));
+        });
+      },
+      '/vscode/ack': (body) => {
+        vscode.ack(body?.jobId, body);
+        res.statusCode = 204;
+        res.end();
+      },
+      '/vscode/bye': (body) => {
+        vscode.cancel(body?.id);
+        res.statusCode = 204;
+        res.end();
+      },
+      '/vscode/focus': (body) => {
+        vscode.focus(body?.id, body?.focusedAt);
+        res.statusCode = 204;
+        res.end();
+      },
+    };
+    const route = req.method === 'POST' ? routes[url] : null;
+    if (!route) {
       res.statusCode = 404;
       res.end();
       req.resume();
@@ -390,17 +510,12 @@ export async function startDaemon({
       else chunks.push(d);
     });
     req.on('end', () => {
-      if (tooBig) { res.statusCode = 413; res.end(); log.warn('hook event too large', { size }); return; }
-      res.statusCode = 204;
-      res.end();
+      if (tooBig) { res.statusCode = 413; res.end(); log.warn('request body too large', { url, size }); return; }
       let body;
-      try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch {
-        log.warn('hook event: invalid JSON');
-        return;
-      }
-      enqueue(`hook ${body?.event}`, () => onHookEvent(body));
+      try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { body = undefined; }
+      route(body);
     });
-    req.on('error', (e) => log.warn('hook request error', { error: errText(e) }));
+    req.on('error', (e) => log.warn('http request error', { url, error: errText(e) }));
   });
 
   const listenPort = port ?? config.port;
@@ -457,6 +572,7 @@ export async function startDaemon({
       timers.clear();
       for (const s of sleepers) { clearTimeout(s.t); s.resolve(); }
       sleepers.clear();
+      vscode.close();
       server.closeAllConnections?.();
       await new Promise((r) => server.close(() => r()));
       if (snapTimer) { clearTimeout(snapTimer); writeSnapshot(); }

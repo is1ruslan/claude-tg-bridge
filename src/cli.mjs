@@ -11,6 +11,7 @@ import { mergeHooks, removeHooks } from './settings.mjs';
 import { restrictToUser } from './acl.mjs';
 import { listProcs } from './procs.mjs';
 import { createTelegram } from './telegram.mjs';
+import { buildVsix, EXT_ID } from './vsix.mjs';
 
 const TASK = 'cc-telegram';
 const ENV_TEMPLATE = `# cc-telegram — впишите значения сами, файл доступен только вашему пользователю
@@ -22,8 +23,9 @@ export const USAGE = `cc-telegram — мост между Claude Code и Telegra
 
 Использование: node src/cli.mjs <команда>
 
-  install     установить: сборка inject.exe, папки, .env, задача Планировщика, хуки в settings.json
-  uninstall   остановить демон, удалить задачу и хуки (.env, логи, состояние остаются)
+  install     установить: сборка inject.exe, папки, .env, задача Планировщика, хуки в settings.json,
+              расширение VS Code (новые сессии из бота)
+  uninstall   остановить демон, удалить задачу, хуки и расширение (.env, логи, состояние остаются)
   status      состояние демона, сессии, задача, флаг отключения
   start       запустить демон (задача Планировщика)
   stop        остановить демон
@@ -265,11 +267,27 @@ async function install(d) {
 
   writeSettings(d, st.file, mergeHooks(st.obj, d.repo), st.existed);
 
+  // VS Code extension for «➕ Новая сессия». Optional: a failure here does not undo the install.
+  const vsix = path.join(p.root, 'cc-telegram-bridge.vsix');
+  let extLine;
+  try {
+    (d.buildVsix ?? buildVsix)(path.join(d.repo, 'vscode-ext'), vsix, {
+      node: d.execPath, script: path.join(d.repo, 'src', 'newsession.mjs'),
+    });
+    const x = await d.exec('cmd.exe', ['/d', '/c', 'code', '--install-extension', vsix, '--force']);
+    extLine = x.code === 0
+      ? '  - расширение VS Code cc-telegram-bridge (один раз выполните в VS Code: Developer: Reload Window)'
+      : `  - расширение VS Code не установлено: ${(x.stderr || x.stdout).trim()} — установите вручную: code --install-extension "${vsix}"`;
+  } catch (e) {
+    extLine = `  - расширение VS Code не собрано: ${e.message}`;
+  }
+
   d.out('Установлено:');
   d.out(`  - собран native/inject.exe`);
   d.out(`  - папка данных: ${p.root}`);
   d.out(`  - хуки добавлены в ${st.file}${st.existed ? ' (резервная копия settings.json.bak-*)' : ''}`);
   d.out(`  - задача Планировщика ${TASK} (запуск при входе в систему)`);
+  d.out(extLine);
   if (envFilled(d)) {
     const r = await d.exec('schtasks', ['/Run', '/TN', TASK]);
     d.out(r.code === 0 ? '  - демон запущен' : `  - не удалось запустить задачу: ${r.stderr || r.stdout}`.trim());
@@ -295,6 +313,9 @@ async function uninstall(d) {
     }
   } catch (e) { d.err(e.message); }
   d.fs.rmSync(path.join(p.root, 'launch.vbs'), { force: true });
+  const x = await d.exec('cmd.exe', ['/d', '/c', 'code', '--uninstall-extension', EXT_ID]);
+  d.out(x.code === 0 ? 'расширение VS Code удалено' : 'расширение VS Code не найдено или не удалено');
+  d.fs.rmSync(path.join(p.root, 'cc-telegram-bridge.vsix'), { force: true });
   d.out(`Оставлено: ${p.root} (.env, logs, state). Удалить вручную: rmdir /s /q "${p.root}"`);
   return 0;
 }
@@ -343,7 +364,12 @@ export async function run(argv, d = defaultDeps()) {
     case 'enable': d.fs.rmSync(p.disabledFlag, { force: true }); d.out('мост включён'); return 0;
     case 'stop': await stopDaemon(d); return 0;
     case 'start': return (await startDaemon(d)) ? 0 : 1;
-    case 'restart': await stopDaemon(d); return (await startDaemon(d)) ? 0 : 1;
+    case 'restart':
+      await stopDaemon(d);
+      // The task instance (wscript waiting on the supervisor) may still count as running;
+      // with MultipleInstancesPolicy=IgnoreNew the next /Run would then be silently dropped.
+      await d.exec('schtasks', ['/End', '/TN', TASK]);
+      return (await startDaemon(d)) ? 0 : 1;
     case undefined: case '--help': case '-h': case 'help': d.out(USAGE); return 0;
     default: d.err(`неизвестная команда: ${cmd}\n\n${USAGE}`); return 1;
   }

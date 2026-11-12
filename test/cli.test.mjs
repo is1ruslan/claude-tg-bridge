@@ -81,6 +81,23 @@ test('uninstall removes hooks, task, launcher; keeps .env', async () => {
   assert.ok(fs.existsSync(path.join(root, '.env')));
   assert.ok(!fs.existsSync(path.join(root, 'launch.vbs')));
   assert.ok(calls.some((c) => c[1] === '/Delete'));
+  assert.ok(calls.some((c) => c[0] === 'cmd.exe' && c.includes('--uninstall-extension') && c.includes('cc-telegram.cc-telegram-bridge')));
+  assert.ok(!fs.existsSync(path.join(root, 'cc-telegram-bridge.vsix')));
+});
+
+test('install: builds the .vsix and installs it via code; failure is reported, install still succeeds', async () => {
+  const { home, d, calls, lines } = setup();
+  assert.equal(await run(['install'], d), 0);
+  const vsix = path.join(home, '.claude', 'telegram', 'cc-telegram-bridge.vsix');
+  assert.ok(fs.existsSync(vsix));
+  assert.deepEqual(calls.find((c) => c[0] === 'cmd.exe'), ['cmd.exe', '/d', '/c', 'code', '--install-extension', vsix, '--force']);
+  assert.ok(lines.some((l) => /Reload Window/.test(l)));
+
+  const f = setup();
+  f.d.exec = async (cmd, args) => (cmd === 'cmd.exe' ? { code: 1, stdout: '', stderr: "'code' is not recognized" } : { code: 0, stdout: '', stderr: '' });
+  assert.equal(await run(['install'], f.d), 0);
+  assert.ok(f.lines.some((l) => /расширение VS Code не установлено: 'code' is not recognized/.test(l)));
+  assert.ok(fs.existsSync(path.join(f.home, '.claude', 'settings.json')));
 });
 
 test('stop kills supervisor tree when parent is node.exe', async () => {
@@ -291,4 +308,13 @@ test('F8: XML escapes special characters in paths and user name', async () => {
   const xml = taskXml({ userId: 'D&D\\bo<b>', launcher: 'C:\\a&b\\launch.vbs' });
   assert.ok(xml.includes('<UserId>D&amp;D\\bo&lt;b&gt;</UserId>'));
   assert.ok(xml.includes('<Arguments>"C:\\a&amp;b\\launch.vbs"</Arguments>'));
+});
+
+test('restart ends the lingering task instance before /Run (IgnoreNew would drop it)', async () => {
+  const { d, calls } = setup();
+  d.fetch = async () => ({ ok: true, json: async () => ({ ok: true, sessions: 0 }) });
+  await run(['restart'], d);
+  const i = calls.findIndex((c) => c[0] === 'schtasks' && c[1] === '/End');
+  const j = calls.findIndex((c) => c[0] === 'schtasks' && c[1] === '/Run');
+  assert.ok(i >= 0 && j > i, JSON.stringify(calls));
 });

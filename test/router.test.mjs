@@ -38,7 +38,7 @@ function harness() {
     const payload = fx(name, patch);
     return deliver(handleHookEvent(store, { event: payload.hook_event_name, payload, ...extra }, at));
   };
-  const upd = (update, { userId = USER, now = T0 + 1000 } = {}) => deliver(handleUpdate(store, update, { userId, now }));
+  const upd = (update, { userId = USER, now = T0 + 1000, ...ctx } = {}) => deliver(handleUpdate(store, update, { userId, now, ...ctx }));
   const text = (t, { from = USER, replyTo, chatType = 'private' } = {}) => {
     const message = { message_id: nextMsg++, from: { id: from }, chat: { id: from, type: chatType }, text: t };
     if (replyTo != null) message.reply_to_message = { message_id: replyTo, from: { id: 1 }, chat: { id: from, type: chatType } };
@@ -60,6 +60,12 @@ const twoSessions = () => {
   const h = started();
   h.hook('SessionStart', { patch: B, claudePid: 5555, branch: 'dev', at: T0 + 1 });
   return h;
+};
+// Plain text now always shows the picker; press the session's button and return those effects.
+const pickTo = (h, t, sid = SID) => {
+  const u = h.text(t);
+  const [pick] = h.upd(u).filter(e => e.type === 'send');
+  return h.upd(h.cb(`r|${sid.slice(0, 8)}|${u.message.message_id}`, { messageId: pick.messageId }));
 };
 const lastDialog = (store) => [...store.dialogs.values()].at(-1);
 const ofType = (eff, type) => eff.filter(e => e.type === type);
@@ -262,7 +268,7 @@ test('plain text (no reply) while ask open → other answer for current question
   const h = started();
   h.hook('PreToolUse-Ask-two');
   const d = lastDialog(h.store);
-  const e1 = h.upd(h.text('Бирюзовый'));
+  const e1 = pickTo(h, 'Бирюзовый');
   assert.deepEqual(d.answers, [{ kind: 'other', text: 'Бирюзовый' }]);
   assert.equal(injects(e1).length, 0);
   assert.equal(d.cursor, 1);
@@ -279,7 +285,7 @@ test('text while ask is injected → "обрабатывается", no inject',
   h.hook('PreToolUse-Ask-single');
   const d = lastDialog(h.store);
   h.upd(h.cb(`a|${d.id}|0|1`));
-  const eff = h.upd(h.text('ещё'));
+  const eff = pickTo(h, 'ещё');
   assert.equal(injects(eff).length, 0);
   assert.match(sends(eff)[0].text, /обрабатывается/);
 });
@@ -325,7 +331,7 @@ test('plain text while plan open → plan feedback', () => {
   const h = started();
   h.hook('PreToolUse-ExitPlanMode');
   const d = lastDialog(h.store);
-  const eff = h.upd(h.text('короче'));
+  const eff = pickTo(h, 'короче');
   assert.deepEqual(injects(eff)[0].steps, [{ text: '3' }, { text: 'короче' }, { sleep: 400 }, { key: 'ENTER' }]);
   assert.equal(injects(eff)[0].verify, undefined);
   assert.equal(d.status, 'injected');
@@ -354,21 +360,21 @@ test('perm "Да" → verify; perm "Нет" (last option) → no verify', () => 
 test('RF-3: text while perm dialog open → no inject, "ответьте кнопками"', () => {
   const h = started();
   const [perm] = h.hook('PermissionRequest-Write');
-  for (const u of [h.text('да давай'), h.text('да', { replyTo: perm.messageId })]) {
-    const eff = h.upd(u);
+  for (const eff of [pickTo(h, 'да давай'), h.upd(h.text('да', { replyTo: perm.messageId }))]) {
     assert.equal(injects(eff).length, 0);
-    assert.equal(eff.length, 1);
-    assert.match(eff[0].text, /ответьте кнопками/);
+    const [s] = sends(eff);
+    assert.match(s.text, /ответьте кнопками/);
   }
   assert.equal(lastDialog(h.store).status, 'open');
 });
 
 // ---------- routing ----------
 
-test('one live session, no dialog → instruction inject + "Отправлено" reply', () => {
+test('one live session, picked → instruction inject + "Отправлено" reply', () => {
   const h = started();
   const u = h.text('сделай рефакторинг');
-  const eff = h.upd(u);
+  const [pick] = sends(h.upd(u));
+  const eff = h.upd(h.cb(`r|${SID.slice(0, 8)}|${u.message.message_id}`, { messageId: pick.messageId }));
   assert.deepEqual(injects(eff), [{ type: 'inject', sessionId: SID, steps: [{ text: 'сделай рефакторинг' }, { sleep: 400 }, { key: 'ENTER' }] }]);
   const [s] = sends(eff);
   assert.equal(s.text, '➡️ Отправлено в ' + h.store.labelOf(SID));
@@ -376,11 +382,6 @@ test('one live session, no dialog → instruction inject + "Отправлено
   assert.deepEqual(s.bind, { sessionId: SID });
 });
 
-test('no sessions → "Нет активных сессий"', () => {
-  const h = harness();
-  const eff = h.upd(h.text('привет'));
-  assert.deepEqual(eff.map(e => e.text), ['Нет активных сессий']);
-});
 
 test('two sessions + text without reply → pendingRoute + picker; r| injects into chosen', () => {
   const h = twoSessions();
@@ -388,8 +389,8 @@ test('two sessions + text without reply → pendingRoute + picker; r| injects in
   const eff = h.upd(u, { now: T0 + 50 });
   assert.equal(injects(eff).length, 0);
   const [pick] = sends(eff);
-  assert.equal(pick.text, 'В какую сессию отправить?');
-  assert.equal(pick.keyboard.length, 2);
+  assert.equal(pick.text, 'Куда отправить?');
+  assert.equal(pick.keyboard.length, 3);
   assert.deepEqual(h.store.pendingRoute?.text, 'запусти тесты');
   assert.equal(h.store.pendingRoute.createdAt, T0 + 50);
   const btnB = pick.keyboard.flat().find(b => b.callback_data === `r|${SID_B.slice(0, 8)}|${u.message.message_id}`);
@@ -534,7 +535,7 @@ test('F3: dialog-resolving edits come BEFORE the inject (ask, multi submit, plan
 
   const hf = started();
   hf.hook('PreToolUse-ExitPlanMode');
-  eff = hf.upd(hf.text('короче'));
+  eff = pickTo(hf, 'короче');
   assert.ok(before(eff, 'edit', 'inject'), types(eff).join());
 
   for (const opt of [1, 3]) {
@@ -583,4 +584,131 @@ test('F2: a second stop for the same session within 3 s → «уже остан�
   assert.deepEqual(cbAgain.map(e => [e.type, e.text]), [['answerCallback', 'уже остановлено']]);
   // after 3 s a new stop goes through
   assert.equal(injects(h.upd(h.text('/stop'), { now: T0 + 4001 })).length, 1);
+});
+
+/// ---------- new session ----------
+
+const NEW_BTN = '➕ Новая сессия';
+const DIRS = [{ path: 'C:\\Projects\\alpha', label: 'alpha' }, { path: 'C:\\Projects\\beta', label: 'beta' }];
+const ctxUpd = (h, update, ctx = {}) => h.upd(update, ctx);
+
+test('new: plain text with ONE live session → picker with the session + «Новая сессия», no inject', () => {
+  const h = started();
+  const u = h.text('сделай X');
+  const eff = h.upd(u);
+  assert.equal(injects(eff).length, 0);
+  const [pick] = sends(eff);
+  assert.equal(pick.text, 'Куда отправить?');
+  const btns = pick.keyboard.flat();
+  assert.deepEqual(btns.map(b => b.callback_data), [`r|${SID.slice(0, 8)}|${u.message.message_id}`, `n|${u.message.message_id}`]);
+  assert.equal(btns[1].text, NEW_BTN);
+});
+
+test('new: no live sessions → picker with only «Новая сессия»', () => {
+  const h = harness();
+  const u = h.text('привет');
+  const [pick] = sends(h.upd(u));
+  assert.match(pick.text, /Активных сессий нет/);
+  assert.deepEqual(pick.keyboard.flat().map(b => b.callback_data), [`n|${u.message.message_id}`]);
+});
+
+test('new: n| → picker edited into folder list (recentDirs) + «Другая папка»', () => {
+  const h = harness();
+  const u = h.text('напиши README');
+  const [pick] = sends(h.upd(u));
+  const eff = ctxUpd(h, h.cb(`n|${u.message.message_id}`, { messageId: pick.messageId }), { recentDirs: DIRS });
+  assert.equal(eff[0].type, 'answerCallback');
+  const [ed] = ofType(eff, 'edit');
+  assert.equal(ed.messageId, pick.messageId);
+  assert.equal(ed.text, '📂 Где запустить новую сессию?');
+  const k = u.message.message_id;
+  assert.deepEqual(ed.keyboard.flat().map(b => [b.text, b.callback_data]), [
+    ['📁 alpha', `f|${k}|0`], ['📁 beta', `f|${k}|1`], ['📂 Другая папка', `f|${k}|o`],
+  ]);
+  assert.deepEqual(h.store.pendingRoute.folders, ['C:\\Projects\\alpha', 'C:\\Projects\\beta']);
+});
+
+test('new: f|k|1 → spawn effect for that folder, route cleared, picker edited', () => {
+  const h = harness();
+  const u = h.text('напиши README');
+  const [pick] = sends(h.upd(u));
+  const k = u.message.message_id;
+  ctxUpd(h, h.cb(`n|${k}`, { messageId: pick.messageId }), { recentDirs: DIRS });
+  const eff = h.upd(h.cb(`f|${k}|1`, { messageId: pick.messageId }));
+  assert.equal(eff[0].type, 'answerCallback');
+  const [ed] = ofType(eff, 'edit');
+  assert.deepEqual(ed, { type: 'edit', messageId: pick.messageId, text: '🆕 Запускаю в beta…', keyboard: null });
+  assert.deepEqual(ofType(eff, 'spawn'), [{
+    type: 'spawn', cwd: 'C:\\Projects\\beta', text: 'напиши README', replyTo: k, msgKey: String(k), pickerId: pick.messageId,
+  }]);
+  assert.equal(h.store.pendingRoute, null);
+  // pressing again → stale
+  assert.equal(h.upd(h.cb(`f|${k}|1`))[0].text, 'Устарело');
+});
+
+test('new: «Другая папка» → ask path; unknown path re-asked; valid (quoted) path → spawn', () => {
+  const h = started();
+  const u = h.text('проверь сборку');
+  const [pick] = sends(h.upd(u));
+  const k = u.message.message_id;
+  ctxUpd(h, h.cb(`n|${k}`, { messageId: pick.messageId }), { recentDirs: [] });
+  const ask = h.upd(h.cb(`f|${k}|o`, { messageId: pick.messageId }));
+  const [prompt] = sends(ask);
+  assert.equal(prompt.forceReply, true);
+  assert.match(prompt.text, /путь к папке/);
+  const isDir = (p) => p === 'D:\\work\\app';
+  const bad = ctxUpd(h, h.text('D:\\nope', { replyTo: prompt.messageId }), { isDir });
+  assert.match(sends(bad)[0].text, /Папка не найдена/);
+  assert.equal(injects(bad).length, 0);
+  const ok = ctxUpd(h, h.text('"D:\\work\\app"'), { isDir });
+  assert.deepEqual(ofType(ok, 'spawn').map(e => [e.cwd, e.text, e.replyTo]), [['D:\\work\\app', 'проверь сборку', k]]);
+  assert.equal(injects(ok).length, 0);
+  assert.equal(h.store.pendingRoute, null);
+});
+
+test('new: n| / f| with stale msgKey → «Устарело»', () => {
+  const h = harness();
+  const u1 = h.text('один');
+  h.upd(u1);
+  h.upd(h.text('два'));
+  assert.equal(h.upd(h.cb(`n|${u1.message.message_id}`), { recentDirs: DIRS })[0].text, 'Устарело');
+  assert.equal(h.upd(h.cb(`f|${u1.message.message_id}|0`))[0].text, 'Устарело');
+});
+
+test('new: after «Другая папка» a non-path text cancels the folder question and is handled as a new message', () => {
+  const h = started();
+  const u = h.text('задача');
+  const [pick] = sends(h.upd(u));
+  const k = u.message.message_id;
+  ctxUpd(h, h.cb(`n|${k}`, { messageId: pick.messageId }), { recentDirs: [] });
+  h.upd(h.cb(`f|${k}|o`, { messageId: pick.messageId }));
+  const isDir = () => true;
+  for (const t of ['передумал, сделай тесты', 'Projects']) {
+    const u2 = h.text(t);
+    const eff = ctxUpd(h, u2, { isDir });
+    assert.equal(ofType(eff, 'spawn').length, 0, t);
+    assert.equal(sends(eff)[0].text, 'Куда отправить?', t);
+    assert.equal(h.store.pendingRoute.text, t);
+    assert.equal(h.store.pendingRoute.awaitingDir, undefined);
+  }
+});
+
+test('new: missing folder directly in C:\\Projects → spawn with create:true; deeper/other paths → not found', () => {
+  const h = started();
+  const u = h.text('новый проект');
+  const [pick] = sends(h.upd(u));
+  const k = u.message.message_id;
+  ctxUpd(h, h.cb(`n|${k}`, { messageId: pick.messageId }), { recentDirs: [] });
+  const [prompt] = sends(h.upd(h.cb(`f|${k}|o`, { messageId: pick.messageId })));
+  assert.match(prompt.text, /создам/);
+  const isDir = () => false;
+  for (const p of ['C:\\Projects\\a\\b', 'D:\\Projects\\x']) {
+    const eff = ctxUpd(h, h.text(p), { isDir });
+    assert.match(sends(eff)[0].text, /Папка не найдена.*только прямо в C:\\Projects/);
+    assert.equal(ofType(eff, 'spawn').length, 0);
+  }
+  const ok = ctxUpd(h, h.text('c:/projects/test-tg'), { isDir });
+  assert.deepEqual(ofType(ok, 'spawn').map(e => [e.cwd, e.create]), [['C:\\Projects\\test-tg', true]]);
+  assert.equal(ofType(ok, 'edit')[0].text, '🆕 Создаю папку и запускаю в test-tg…');
+  assert.equal(h.store.pendingRoute, null);
 });

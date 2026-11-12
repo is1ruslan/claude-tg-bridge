@@ -357,8 +357,8 @@ test('plugin mode (--plugin or the plugin enabled in settings.json): no hooks in
   assert.ok(JSON.parse(fs.readFileSync(file, 'utf8')).hooks);
   assert.equal(await run(['install', '--plugin'], d), 0);
   assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { effortLevel: 'high' });
-  assert.ok(lines.some((l) => /hooks: provided by the claude-tg-bridge plugin/.test(l)));
-  const enabled = { enabledPlugins: { 'claude-tg-bridge@claude-tg-bridge': true } };
+  assert.ok(lines.some((l) => /hooks: provided by the tg-bridge plugin/.test(l)));
+  const enabled = { enabledPlugins: { 'tg-bridge@tg-bridge': true } };
   fs.writeFileSync(file, JSON.stringify(enabled));
   assert.equal(await run(['install'], d), 0);
   assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), enabled);

@@ -14,7 +14,7 @@ import { createTelegram } from './telegram.mjs';
 import { buildVsix, EXT_ID } from './vsix.mjs';
 
 const TASK = 'cc-telegram';
-export const PLUGIN_NAME = 'claude-tg-bridge';
+export const PLUGIN_NAME = 'tg-bridge'; // plugin id (Claude Code reserves names starting with claude-)
 // What install copies into ~/.claude/telegram/app: a stable home for the daemon, independent of
 // where the plugin cache (or a git clone) lives and of plugin updates.
 const APP_ITEMS = ['src', 'native', 'scripts', 'vscode-ext', 'package.json'];

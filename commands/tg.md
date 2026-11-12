@@ -14,4 +14,4 @@ If no arguments were given, run it with `status`.
 
 Never read or print `%USERPROFILE%\.claude\telegram\.env` — it holds the bot token.
 
-After `uninstall`, tell the user that the plugin itself is removed with `/plugin uninstall claude-tg-bridge`, and that `%USERPROFILE%\.claude\telegram` (settings, logs) is kept until they delete it.
+After `uninstall`, tell the user that the plugin itself is removed with `/plugin uninstall tg-bridge`, and that `%USERPROFILE%\.claude\telegram` (settings, logs) is kept until they delete it.

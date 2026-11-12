@@ -1,6 +1,6 @@
 # claude-tg-bridge
 
-A Claude Code plugin that connects your Claude Code sessions to a private Telegram bot. You can walk away from the computer and keep working from your phone: Claude reports finished tasks, asks its questions with buttons, requests permissions, and takes new instructions — all in Telegram. The terminal keeps working as usual; whichever side answers first wins.
+A Claude Code plugin (plugin id `tg-bridge`) that connects your Claude Code sessions to a private Telegram bot. You can walk away from the computer and keep working from your phone: Claude reports finished tasks, asks its questions with buttons, requests permissions, and takes new instructions — all in Telegram. The terminal keeps working as usual; whichever side answers first wins.
 
 > **Platform:** Windows 10/11, Claude Code in the VS Code integrated terminal or PowerShell. macOS/Linux are not supported yet — see [Porting](#porting-to-macos--linux).
 
@@ -69,13 +69,13 @@ In Claude Code:
 
 ```
 /plugin marketplace add is1ruslan/claude-tg-bridge
-/plugin install claude-tg-bridge@claude-tg-bridge
+/plugin install tg-bridge@tg-bridge
 ```
 
 Then run the setup command:
 
 ```
-/claude-tg-bridge:setup
+/tg-bridge:setup
 ```
 
 It copies the runtime to `%USERPROFILE%\.claude\telegram\app`, compiles `inject.exe`, creates the `.env` template, registers the Task Scheduler task `cc-telegram` (starts the daemon at logon) and installs the small VS Code extension used for new sessions.
@@ -102,8 +102,8 @@ CC_TG_PROJECTS_DIR=                     # optional, default %USERPROFILE%\Projec
 Then:
 
 ```
-/claude-tg-bridge:tg restart
-/claude-tg-bridge:tg test
+/tg-bridge:tg restart
+/tg-bridge:tg test
 ```
 
 You should get `🔔 claude-tg-bridge: connection test` in Telegram. Restart open Claude Code sessions so they pick up the plugin's hooks, and in VS Code run **Developer: Reload Window** once so the extension starts.
@@ -116,11 +116,11 @@ cd claude-tg-bridge
 node src/cli.mjs install
 ```
 
-In this mode the hooks are written into `%USERPROFILE%\.claude\settings.json` (a backup `settings.json.bak-<date>` is made first). Use `node src/cli.mjs <command>` wherever this README says `/claude-tg-bridge:tg <command>`.
+In this mode the hooks are written into `%USERPROFILE%\.claude\settings.json` (a backup `settings.json.bak-<date>` is made first). Use `node src/cli.mjs <command>` wherever this README says `/tg-bridge:tg <command>`.
 
 ## Managing the bridge
 
-`/claude-tg-bridge:tg <command>` (or `node src/cli.mjs <command>` from a clone):
+`/tg-bridge:tg <command>` (or `node src/cli.mjs <command>` from a clone):
 
 | Command | What it does |
 | --- | --- |
@@ -136,8 +136,8 @@ To keep a single session out of Telegram, start it with the environment variable
 ## Updating
 
 ```
-/plugin update claude-tg-bridge
-/claude-tg-bridge:setup
+/plugin update tg-bridge
+/tg-bridge:setup
 ```
 
 Setup is idempotent: it stops the daemon, replaces the app copy, rebuilds `inject.exe` and starts the daemon again.
@@ -145,8 +145,8 @@ Setup is idempotent: it stops the daemon, replaces the app copy, rebuilds `injec
 ## Uninstalling
 
 ```
-/claude-tg-bridge:tg uninstall
-/plugin uninstall claude-tg-bridge
+/tg-bridge:tg uninstall
+/plugin uninstall tg-bridge
 ```
 
 Then delete `%USERPROFILE%\.claude\telegram` if you no longer need the settings and logs.

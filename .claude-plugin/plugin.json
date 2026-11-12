@@ -1,5 +1,5 @@
 {
-  "name": "claude-tg-bridge",
+  "name": "tg-bridge",
   "description": "Telegram bridge for Claude Code (Windows): task summaries, questions with inline buttons, permission prompts, instructions and new sessions from a private bot",
   "version": "0.1.0",
   "author": {

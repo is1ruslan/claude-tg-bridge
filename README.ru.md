@@ -11,8 +11,8 @@
 
    ```
    /plugin marketplace add is1ruslan/claude-tg-bridge
-   /plugin install claude-tg-bridge@claude-tg-bridge
-   /claude-tg-bridge:setup
+   /plugin install tg-bridge@tg-bridge
+   /tg-bridge:setup
    ```
 
 3. Впишите сами (не в чат!) в `%USERPROFILE%\.claude\telegram\.env`:
@@ -24,7 +24,7 @@
    CC_TG_PROJECTS_DIR=C:\Projects # где «Другая папка» может создать новую папку (по умолчанию %USERPROFILE%\Projects)
    ```
 
-4. `/claude-tg-bridge:tg restart`, затем `/claude-tg-bridge:tg test` — придёт тестовое сообщение. Перезапустите открытые сессии Claude Code, в VS Code один раз выполните **Developer: Reload Window**.
+4. `/tg-bridge:tg restart`, затем `/tg-bridge:tg test` — придёт тестовое сообщение. Перезапустите открытые сессии Claude Code, в VS Code один раз выполните **Developer: Reload Window**.
 
 ## Команды бота
 
@@ -35,8 +35,8 @@
 
 ## Управление
 
-`/claude-tg-bridge:tg status | restart | start | stop | logs [n] | test | disable | enable | uninstall`
+`/tg-bridge:tg status | restart | start | stop | logs [n] | test | disable | enable | uninstall`
 
-- Обновление: `/plugin update claude-tg-bridge`, затем `/claude-tg-bridge:setup`.
-- Временно выключить: `/claude-tg-bridge:tg disable` (обратно — `enable`); одну сессию — переменная `CC_TELEGRAM_DISABLE=1`.
-- Удаление: `/claude-tg-bridge:tg uninstall`, затем `/plugin uninstall claude-tg-bridge`; папку `%USERPROFILE%\.claude\telegram` удалить вручную.
+- Обновление: `/plugin update tg-bridge`, затем `/tg-bridge:setup`.
+- Временно выключить: `/tg-bridge:tg disable` (обратно — `enable`); одну сессию — переменная `CC_TELEGRAM_DISABLE=1`.
+- Удаление: `/tg-bridge:tg uninstall`, затем `/plugin uninstall tg-bridge`; папку `%USERPROFILE%\.claude\telegram` удалить вручную.

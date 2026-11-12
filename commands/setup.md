@@ -18,7 +18,7 @@ Install or update claude-tg-bridge on this machine.
    - Get their numeric user ID, e.g. from @userinfobot.
    - Open the file the installer printed (`%USERPROFILE%\.claude\telegram\.env`) in an editor and set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_USER_ID`. Optional: `CC_TG_LANG=ru` for a Russian bot, `CC_TG_PROJECTS_DIR` for the folder where «➕ New session» may create projects.
    - Send any message to the new bot once (Telegram bots can only write to users who started them).
-   - Then run `/claude-tg-bridge:tg restart` and `/claude-tg-bridge:tg test`.
+   - Then run `/tg-bridge:tg restart` and `/tg-bridge:tg test`.
 
 3. If VS Code is open, remind the user to run **Developer: Reload Window** once so the bridge extension starts.
 

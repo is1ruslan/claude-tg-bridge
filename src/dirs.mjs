@@ -1,6 +1,7 @@
 // Recent project folders, from Claude Code's history in ~/.claude/projects/<encoded>/<session>.jsonl.
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 
 const HEAD_BYTES = 64 * 1024;
@@ -15,7 +16,8 @@ export function isDir(p) {
 // Only absolute local or UNC paths count as a folder answer (anything else is a normal message).
 export const looksLikeDir = (s) => /^([A-Za-z]:[\\/]|\\\\[^\\])/.test(s) && !/[\r\n]/.test(s);
 
-export const PROJECTS_ROOT = 'C:\\Projects';
+// Default projects folder; CC_TG_PROJECTS_DIR in .env overrides it (config.projectsDir).
+export const PROJECTS_ROOT = path.join(os.homedir(), 'Projects');
 const RESERVED = /^(con|prn|aux|nul|com\d|lpt\d)(\..*)?$/i;
 
 // A missing folder may be created only as a direct child of `root` with a valid Windows name.

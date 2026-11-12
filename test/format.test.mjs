@@ -2,6 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import * as F from '../src/format.mjs';
+import { setLang } from '../src/i18n.mjs';
+
+setLang('ru'); // these tests assert the Russian UI texts
 
 const fx = (n) => JSON.parse(readFileSync(new URL(`./fixtures/hooks/${n}.json`, import.meta.url), 'utf8'));
 const cbs = (kb) => kb.flat().map((b) => b.callback_data);

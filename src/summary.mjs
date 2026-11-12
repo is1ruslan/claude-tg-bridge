@@ -1,23 +1,11 @@
 import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { t } from './i18n.mjs';
 
 const MAX_INPUT = 12000;
 const SHORT_LINES = 5;
 const SHORT_CHARS = 500;
-
-const SYSTEM_PROMPT =
-  'Ты пересказываешь отчёт ассистента для сообщения в Telegram. Ответь ТОЛЬКО JSON без markdown: ' +
-  '{"status":"done|waiting|error","summary":"..."}. ' +
-  'status=waiting если ассистент ждёт решения или задал вопрос, error если сообщает о неудаче, иначе done. ' +
-  'summary — по-русски, простым текстом без markdown, абзацы разделяй пустой строкой (\\n\\n). ' +
-  'Если status=waiting: человеку нужно принять решение, не читая исходный отчёт, поэтому не пережимай — ' +
-  'до ~700 символов, 3–4 абзаца: (1) что уже сделано и в каком состоянии работа; ' +
-  '(2) в чём вопрос и почему он возник; (3) варианты — каждый с новой строки через "- ", с последствием в несколько слов, ' +
-  'и рекомендация ассистента, если она есть; (4) что именно нужно ответить. ' +
-  'Сохраняй конкретику: имена файлов, числа, названия вариантов. ' +
-  'Иначе: 2–5 коротких строк — что сделано, что осталось, что нужно от пользователя (если нужно); каждая мысль отдельным абзацем. ' +
-  'Без воды и вступлений.';
 
 let cached;
 
@@ -50,7 +38,7 @@ export function runClaude(prompt, { timeoutMs = 60000 } = {}) {
     const { cmd, shell } = resolveClaude();
     const args = ['-p', '--model', 'haiku', '--no-session-persistence', '--setting-sources', '',
       '--strict-mcp-config', '--disable-slash-commands', '--tools', '',
-      '--exclude-dynamic-system-prompt-sections', '--system-prompt', SYSTEM_PROMPT];
+      '--exclude-dynamic-system-prompt-sections', '--system-prompt', t('summaryPrompt')];
     const q = (a) => (shell ? `"${a.replace(/"/g, '""')}"` : a);
     let child;
     try {

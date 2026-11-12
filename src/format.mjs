@@ -1,10 +1,11 @@
 // Pure message formatting (Telegram HTML). User text always goes through esc().
+import { t } from './i18n.mjs';
 
 export const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
-export const header = (label) => `📁 <b>${esc(label || 'сессия')}</b>`;
+export const header = (label) => `📁 <b>${esc(label || t('session'))}</b>`;
 
-const STATUS = { done: '✅ завершено', waiting: '⏸ ждёт решения', error: '❌ ошибка' };
+const STATUS = { done: 'statusDone', waiting: 'statusWaiting', error: 'statusError' };
 
 // Blocks of a message are separated by a blank line so it reads easily in Telegram.
 const blocks = (...parts) => parts.filter((p) => p != null && p !== '').join('\n\n');
@@ -29,7 +30,7 @@ export function paragraphs(text) {
 }
 
 export function completionText(label, status, summary) {
-  return blocks(header(label), `Статус: ${STATUS[status] ?? STATUS.done}`, paragraphs(esc(summary)));
+  return blocks(header(label), t('status', t(STATUS[status] ?? STATUS.done)), paragraphs(esc(summary)));
 }
 
 export function askText(label, question, qIndex, qTotal) {
@@ -42,7 +43,7 @@ export function askText(label, question, qIndex, qTotal) {
     header(label),
     `❓ ${prefix}<b>${esc(question.header)}</b>`,
     esc(question.question),
-    question.multiSelect ? 'Можно выбрать несколько.' : null,
+    question.multiSelect ? t('multiSelect') : null,
     list,
   );
 }
@@ -58,13 +59,13 @@ export function askKeyboard(dlgId, qIndex, question, selected = []) {
   });
   const rows = [];
   for (let i = 0; i < btns.length; i += 5) rows.push(btns.slice(i, i + 5));
-  const other = { text: '✏️ Другое', callback_data: `o|${dlgId}|${qIndex}` };
-  rows.push(multi ? [other, { text: '✅ Отправить', callback_data: `s|${dlgId}|${qIndex}` }] : [other]);
+  const other = { text: t('other'), callback_data: `o|${dlgId}|${qIndex}` };
+  rows.push(multi ? [other, { text: t('submit'), callback_data: `s|${dlgId}|${qIndex}` }] : [other]);
   return rows;
 }
 
 export function planText(label, plan) {
-  return blocks(header(label), '📝 План на подтверждение', esc(plan));
+  return blocks(header(label), t('planHeader'), esc(plan));
 }
 
 // Cut to at most `max` UTF-16 units without splitting a surrogate pair.
@@ -77,11 +78,11 @@ function cutSafe(s, max) {
 }
 
 // <pre> block, plus a ⚠ note line when the text had to be cut.
-function preBlock(text, max, what = 'обрезано') {
+function preBlock(text, max, what = t('cut')) {
   const s = String(text ?? '');
   const head = cutSafe(s, max);
   const pre = `<pre>${esc(head)}</pre>`;
-  return head.length === s.length ? pre : `${pre}\n⚠ ${what} (всего ${s.length} символов) — полностью в терминале`;
+  return head.length === s.length ? pre : `${pre}\n${t('cutNote', what, s.length)}`;
 }
 
 const BASH_MAX = 3500;
@@ -92,13 +93,13 @@ const OTHER_MAX = 1500;
 export function permText(label, toolName, toolInput) {
   const inp = toolInput ?? {};
   const str = (v) => typeof v === 'string';
-  const lines = [header(label), `🔐 Разрешение: <b>${esc(toolName)}</b>`];
+  const lines = [header(label), t('permission', esc(toolName))];
   if (toolName === 'Bash' && str(inp.command)) {
-    lines.push(preBlock(inp.command, BASH_MAX, 'команда обрезана'));
+    lines.push(preBlock(inp.command, BASH_MAX, t('cmdCut')));
   } else if (toolName === 'Edit' && str(inp.file_path)) {
     lines.push(`<pre>${esc(inp.file_path)}</pre>`);
-    if (str(inp.old_string)) lines.push('Было:\n' + preBlock(inp.old_string, EDIT_MAX));
-    if (str(inp.new_string)) lines.push('Стало:\n' + preBlock(inp.new_string, EDIT_MAX));
+    if (str(inp.old_string)) lines.push(t('before') + '\n' + preBlock(inp.old_string, EDIT_MAX));
+    if (str(inp.new_string)) lines.push(t('after') + '\n' + preBlock(inp.new_string, EDIT_MAX));
   } else if (toolName === 'Write' && str(inp.file_path)) {
     lines.push(`<pre>${esc(inp.file_path)}</pre>`);
     if (str(inp.content)) lines.push(preBlock(inp.content, WRITE_MAX));
@@ -122,19 +123,19 @@ export function dialogKeyboard(dlg) {
 }
 
 export function resolvedSuffix(kind, chosen) {
-  if (kind === 'telegram') return `\n\n✔ выбрано: ${esc(chosen)}`;
-  if (kind === 'terminal') return '\n\n✔ отвечено в терминале';
-  return '\n\n⌛ устарело';
+  if (kind === 'telegram') return `\n\n${t('chosen', esc(chosen))}`;
+  if (kind === 'terminal') return `\n\n${t('answeredInTerminal')}`;
+  return `\n\n${t('stale')}`;
 }
 
 // sessions: [{ label, session }]
 export function statusText(sessions, now) {
-  if (!sessions.length) return 'Активных сессий нет';
-  const mins = (t) => Math.max(0, Math.floor((now - t) / 60000));
+  if (!sessions.length) return t('noSessions');
+  const mins = (at) => Math.max(0, Math.floor((now - at) / 60000));
   return sessions.map(({ label, session: s }) => {
-    const st = s.state === 'working' ? `работает ${mins(s.lastPromptAt)} мин`
-      : s.state === 'waiting' ? 'ждёт ответа'
-      : `простаивает ${mins(s.lastActivityAt)} мин`;
+    const st = s.state === 'working' ? t('working', mins(s.lastPromptAt))
+      : s.state === 'waiting' ? t('waitingAnswer')
+      : t('idle', mins(s.lastActivityAt));
     return `• ${esc(label)} — ${st}`;
   }).join('\n');
 }
@@ -146,17 +147,15 @@ export function sessionPickKeyboard(items, prefix, msgKey) {
   }]);
 }
 
-export const NEW_SESSION_BTN = '➕ Новая сессия';
-
-// Session picker for plain text: live sessions (r|short|key) + «Новая сессия» (n|key).
+// Session picker for plain text: live sessions (r|short|key) + «New session» (n|key).
 export function routePickKeyboard(items, msgKey) {
-  return [...sessionPickKeyboard(items, 'r', msgKey), [{ text: NEW_SESSION_BTN, callback_data: `n|${msgKey}` }]];
+  return [...sessionPickKeyboard(items, 'r', msgKey), [{ text: t('newSession'), callback_data: `n|${msgKey}` }]];
 }
 
-// dirs: [{ label }] -> f|key|i rows + «Другая папка» (f|key|o).
+// dirs: [{ label }] -> f|key|i rows + «Other folder» (f|key|o).
 export function folderPickKeyboard(dirs, msgKey) {
   return [
     ...dirs.map(({ label }, i) => [{ text: '📁 ' + label, callback_data: `f|${msgKey}|${i}` }]),
-    [{ text: '📂 Другая папка', callback_data: `f|${msgKey}|o` }],
+    [{ text: t('otherFolder'), callback_data: `f|${msgKey}|o` }],
   ];
 }

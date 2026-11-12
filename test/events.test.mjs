@@ -3,7 +3,10 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { Store } from '../src/sessions.mjs';
 import { handleHookEvent } from '../src/events.mjs';
-import { PLAN_OPTIONS } from '../src/keys.mjs';
+import { planOptions } from '../src/keys.mjs';
+import { setLang } from '../src/i18n.mjs';
+
+setLang('ru'); // these tests assert the Russian UI texts
 
 const FIX = new URL('./fixtures/hooks/', import.meta.url);
 const fx = (name, patch = {}) => ({ ...JSON.parse(readFileSync(new URL(`${name}.json`, FIX), 'utf8')), ...patch });
@@ -284,14 +287,14 @@ test('Ask from Telegram: tool_response.answers missing the question key → mism
   assert.equal(d.closedReason, 'telegram');
 });
 
-test('ExitPlanMode PreToolUse → plan dialog with PLAN_OPTIONS; PostToolUse closes terminal', () => {
+test('ExitPlanMode PreToolUse → plan dialog with planOptions(); PostToolUse closes terminal', () => {
   const h = started();
   const eff = h.run('PreToolUse-ExitPlanMode');
   assert.equal(eff.length, 1);
   const d = h.store.getDialog(eff[0].bind.dialogId);
   assert.equal(d.kind, 'plan');
   assert.equal(d.toolUseId, 'toolu_01H8zN4Z7tTvCYxZK1GiCL5B');
-  assert.deepEqual(d.options, PLAN_OPTIONS);
+  assert.deepEqual(d.options, planOptions());
   assert.match(eff[0].text, /План на подтверждение/);
   assert.deepEqual(eff[0].keyboard.flat().map(b => b.callback_data), [1, 2, 3].map(k => `p|${d.id}|${k}`));
   assert.deepEqual(h.run('PermissionRequest-ExitPlanMode'), []);

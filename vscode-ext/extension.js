@@ -42,11 +42,11 @@ const folders = () => (vscode.workspace.workspaceFolders || []).map((f) => f.uri
 function openTerminal(job) {
   const cwd = String(job.cwd || '');
   if (!path.isAbsolute(cwd) || !fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) {
-    throw new Error('папка не найдена: ' + cwd);
+    throw new Error('folder not found: ' + cwd);
   }
   const promptFile = path.resolve(String(job.promptFile || ''));
   if (path.dirname(promptFile).toLowerCase() !== SPAWN_DIR.toLowerCase() || !fs.existsSync(promptFile)) {
-    throw new Error('неверный файл промпта');
+    throw new Error('invalid prompt file');
   }
   const t = vscode.window.createTerminal({
     name: String(job.title || 'claude'),

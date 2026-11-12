@@ -2,6 +2,7 @@
 import {
   askText, askKeyboard, resolvedSuffix, statusText, sessionPickKeyboard, routePickKeyboard, folderPickKeyboard, esc,
 } from './format.mjs';
+import { t } from './i18n.mjs';
 import { looksLikeDir, newProjectDir, PROJECTS_ROOT } from './dirs.mjs';
 import {
   askSequence, planSequence, permissionSequence, instructionSequence, stopSequence, PLAN_FEEDBACK_INDEX,
@@ -11,17 +12,6 @@ const MAX_EDIT_TEXT = 3900;
 const VERIFY_MS = 10000;
 const PERM_VERIFY_MS = 120000; // F7: an approved tool may run for a while before PostToolUse
 const STOP_DEBOUNCE_MS = 3000; // a second ESC would open the rewind menu
-
-const HELP_TEXT = [
-  'Команды:',
-  '/status — активные сессии',
-  '/stop — остановить сессию (ESC)',
-  '/help — эта справка',
-  '',
-  'Ответьте reply на сообщение проекта, чтобы отправить инструкцию в его сессию.',
-  '',
-  'Сообщение без reply — выбор сессии или «➕ Новая сессия» (откроет терминал в VS Code).',
-].join('\n');
 
 const isLive = d => !!d && (d.status === 'open' || d.status === 'injected');
 const verifyOf = d => ({ dialogId: d.id, timeoutMs: d.kind === 'perm' ? PERM_VERIFY_MS : VERIFY_MS });
@@ -70,7 +60,7 @@ function advance(store, dialog, chosenLabel) {
   } catch {
     // Roll back the answer just recorded; the dialog stays open on the same question.
     dialog.answers.splice(dialog.cursor);
-    return [{ type: 'send', text: '⚠ Не удалось собрать ответ — ответьте в терминале', bind: { sessionId: dialog.sessionId } }];
+    return [{ type: 'send', text: t('answerFailed'), bind: { sessionId: dialog.sessionId } }];
   }
   // F3: edits first, inject last — the executor's failure handling (keyboard restore) must run after them.
   const out = [...resolvedEdit(dialog, chosenLabel), { type: 'inject', sessionId: dialog.sessionId, steps, verify: verifyOf(dialog) }];
@@ -91,19 +81,17 @@ function stopEffects(store, session, now) {
   }
   out.push(
     { type: 'inject', sessionId: session.id, steps: stopSequence() },
-    { type: 'send', text: '⏹ Остановлено: ' + esc(store.labelOf(session.id)), bind: { sessionId: session.id } },
+    { type: 'send', text: t('stopped', esc(store.labelOf(session.id))), bind: { sessionId: session.id } },
   );
   return out;
 }
-const ALREADY_STOPPED = 'уже остановлено';
 
 // Folder name for messages; works for both separators.
 const baseName = (p) => String(p).replace(/[\\/]+$/, '').split(/[\\/]/).pop() || String(p);
-const STALE = 'Устарело';
 
 function spawnEffects(route, cwd, pickerId, { create = false } = {}) {
   const out = [];
-  const what = (create ? '🆕 Создаю папку и запускаю в ' : '🆕 Запускаю в ') + esc(baseName(cwd)) + '…';
+  const what = t(create ? 'spawningCreate' : 'spawning', esc(baseName(cwd)));
   if (pickerId != null) out.push({ type: 'edit', messageId: pickerId, text: what, keyboard: null });
   const spawn = { type: 'spawn', cwd, text: route.text, replyTo: route.messageId, msgKey: String(route.messageId), pickerId: pickerId ?? null };
   if (create) spawn.create = true;
@@ -122,14 +110,14 @@ function handleCallback(store, cq, now, ctx) {
 
   if (kind === 'x') {
     const s = store.sessionByShort(parts[1]);
-    if (!s) return [ack('Сессия завершена')];
+    if (!s) return [ack(t('sessionEnded'))];
     const stop = stopEffects(store, s, now);
-    return stop ? [ack(), ...stop] : [ack(ALREADY_STOPPED)];
+    return stop ? [ack(), ...stop] : [ack(t('alreadyStopped'))];
   }
 
   if (kind === 'n' || kind === 'f') {
     const route = store.pendingRoute;
-    if (!route || String(route.messageId) !== parts[1]) return [ack(STALE)];
+    if (!route || String(route.messageId) !== parts[1]) return [ack(t('staleAck'))];
     const pickerId = cq.message?.message_id ?? route.pickerId;
     if (kind === 'n') {
       const dirs = ctx.recentDirs ?? [];
@@ -138,26 +126,26 @@ function handleCallback(store, cq, now, ctx) {
       route.awaitingDir = false;
       const out = [ack()];
       if (pickerId != null) {
-        out.push({ type: 'edit', messageId: pickerId, text: '📂 Где запустить новую сессию?', keyboard: folderPickKeyboard(dirs, parts[1]) });
+        out.push({ type: 'edit', messageId: pickerId, text: t('whereNewSession'), keyboard: folderPickKeyboard(dirs, parts[1]) });
       }
       return out;
     }
     if (parts[2] === 'o') {
       route.awaitingDir = true;
       route.pickerId = pickerId;
-      return [ack(), { type: 'send', text: `📂 Пришлите полный путь к папке (например ${PROJECTS_ROOT}\\app). Если такой папки в ${PROJECTS_ROOT} нет — создам. Другой текст отменит выбор папки.`, forceReply: true }];
+      return [ack(), { type: 'send', text: t('askPath', esc(ctx.projectsRoot ?? PROJECTS_ROOT)), forceReply: true }];
     }
     const cwd = route.folders?.[Number(parts[2])];
-    if (cwd == null) return [ack(STALE)];
+    if (cwd == null) return [ack(t('staleAck'))];
     store.pendingRoute = null;
     return [ack(), ...spawnEffects(route, cwd, pickerId)];
   }
 
   if (kind === 'r') {
     const route = store.pendingRoute;
-    if (!route || String(route.messageId) !== parts[2]) return [ack(STALE)];
+    if (!route || String(route.messageId) !== parts[2]) return [ack(t('staleAck'))];
     const s = store.sessionByShort(parts[1]);
-    if (!s) return [ack('Сессия завершена')];
+    if (!s) return [ack(t('sessionEnded'))];
     store.pendingRoute = null;
     const out = [ack()];
     const pickerId = cq.message?.message_id;
@@ -169,8 +157,8 @@ function handleCallback(store, cq, now, ctx) {
   if (!['a', 't', 's', 'o', 'p'].includes(kind)) return [ack()];
 
   const d = store.getDialog(parts[1]);
-  if (!d || d.status === 'closed') return [ack('Вопрос уже закрыт')];
-  if (d.status === 'injected') return [ack('Ответ уже отправлен')];
+  if (!d || d.status === 'closed') return [ack(t('questionClosed'))];
+  if (d.status === 'injected') return [ack(t('answerSent'))];
 
   if (kind === 'p') {
     const k = Number(parts[2]) - 1;
@@ -178,7 +166,7 @@ function handleCallback(store, cq, now, ctx) {
     if (d.kind === 'plan' && k === PLAN_FEEDBACK_INDEX) {
       store.pendingOther = d.id;
       return [ack(), {
-        type: 'send', text: '✏️ Напишите, что изменить в плане', forceReply: true,
+        type: 'send', text: t('planEditPrompt'), forceReply: true,
         bind: { sessionId: d.sessionId, dialogId: d.id, prompt: true },
       }];
     }
@@ -199,7 +187,7 @@ function handleCallback(store, cq, now, ctx) {
   // ask callbacks: a|dlg|q|opt, t|dlg|q|opt, s|dlg|q, o|dlg|q
   if (d.kind !== 'ask') return [ack()];
   const q = Number(parts[2]);
-  if (q !== d.cursor) return [ack('Этот вопрос уже пройден')];
+  if (q !== d.cursor) return [ack(t('questionPassed'))];
   const question = d.payload?.questions?.[q];
   if (!question) return [ack()];
   const options = question.options ?? [];
@@ -207,13 +195,13 @@ function handleCallback(store, cq, now, ctx) {
   if (kind === 'o') {
     store.pendingOther = d.id;
     return [ack(), {
-      type: 'send', text: '✏️ Напишите свой вариант ответа', forceReply: true,
+      type: 'send', text: t('otherPrompt'), forceReply: true,
       bind: { sessionId: d.sessionId, dialogId: d.id, prompt: true },
     }];
   }
 
   if (kind === 's') {
-    if (!d.multi.length) return [ack('Выберите хотя бы один вариант')];
+    if (!d.multi.length) return [ack(t('pickOne'))];
     const indexes = [...new Set(d.multi)].sort((x, y) => x - y);
     d.answers[q] = { kind: 'multi', indexes };
     return [ack(), ...advance(store, d, indexes.map(i => options[i]?.label ?? '').join(', '))];
@@ -249,24 +237,24 @@ function deliver(store, session, text, { boundDialogId, replyTo } = {}) {
   const bind = { sessionId: session.id };
   if (d) {
     if (d.status === 'injected') {
-      return [{ type: 'send', text: '⏳ Предыдущий ответ ещё обрабатывается — повторите через пару секунд', bind }];
+      return [{ type: 'send', text: t('busy'), bind }];
     }
     if (d.kind === 'ask') {
       d.answers[d.cursor] = { kind: 'other', text };
       return advance(store, d, text);
     }
     if (d.kind === 'plan') {
-      const edit = resolvedEdit(d, 'правки: ' + text);
+      const edit = resolvedEdit(d, t('planEdits', text));
       markInjected(store, d);
       d.feedbackSent = true; // F6: a later PostToolUse(ExitPlanMode) means the plan got approved instead
       // F3: no verify (rejection emits no event), but dialogId lets a failed inject reopen the dialog.
       return [...edit, { type: 'inject', sessionId: session.id, dialogId: d.id, steps: planSequence(PLAN_FEEDBACK_INDEX, text) }];
     }
     // perm (RF-3): never type free text into a permission prompt.
-    return [{ type: 'send', text: '🔐 В сессии открыт запрос разрешения — ответьте кнопками', bind }];
+    return [{ type: 'send', text: t('permOpen'), bind }];
   }
 
-  const sent = { type: 'send', text: '➡️ Отправлено в ' + esc(store.labelOf(session.id)), bind };
+  const sent = { type: 'send', text: t('sentTo', esc(store.labelOf(session.id))), bind };
   if (replyTo != null) sent.replyTo = replyTo;
   return [{ type: 'inject', sessionId: session.id, steps: instructionSequence(text) }, sent];
 }
@@ -277,30 +265,30 @@ function handleCommand(store, cmd, now) {
     return [{ type: 'send', text: statusText(live.map(s => ({ label: store.labelOf(s.id), session: s })), now) }];
   }
   if (cmd === '/stop') {
-    if (!live.length) return [{ type: 'send', text: 'Нет активных сессий' }];
-    if (live.length === 1) return stopEffects(store, live[0], now) ?? [{ type: 'send', text: ALREADY_STOPPED }];
-    return [{ type: 'send', text: 'Какую сессию остановить?', keyboard: sessionPickKeyboard(pickItems(store), 'x') }];
+    if (!live.length) return [{ type: 'send', text: t('noSessions') }];
+    if (live.length === 1) return stopEffects(store, live[0], now) ?? [{ type: 'send', text: t('alreadyStopped') }];
+    return [{ type: 'send', text: t('whichStop'), keyboard: sessionPickKeyboard(pickItems(store), 'x') }];
   }
-  return [{ type: 'send', text: HELP_TEXT }]; // /help, /start
+  return [{ type: 'send', text: t('help') }]; // /help, /start
 }
 
 const COMMANDS = new Set(['/status', '/stop', '/help', '/start']);
 
 function handleMessage(store, msg, now, ctx) {
-  if (typeof msg.text !== 'string' || !msg.text.trim()) return [{ type: 'send', text: 'Поддерживается только текст' }];
+  if (typeof msg.text !== 'string' || !msg.text.trim()) return [{ type: 'send', text: t('textOnly') }];
   const text = msg.text;
 
   const m = /^(\/[A-Za-z0-9_]+)(?:@[A-Za-z0-9_]+)?(?:\s|$)/.exec(text.trim());
   // Unknown slash commands (e.g. /compact) are passed through to the session as text.
   if (m && COMMANDS.has(m[1].toLowerCase())) return handleCommand(store, m[1].toLowerCase(), now);
 
-  const ended = [{ type: 'send', text: 'Сессия завершена' }];
+  const ended = [{ type: 'send', text: t('sessionEnded') }];
 
   // (1) reply to a bound bot message
   const replyId = msg.reply_to_message?.message_id;
   const binding = replyId != null ? store.lookupMessage(replyId) : null;
 
-  // (0) folder path for «Другая папка» (plain text or a reply to the unbound path prompt).
+  // (0) folder path for «Other folder» (plain text or a reply to the unbound path prompt).
   // Only an absolute path counts; any other text cancels the folder question and is handled normally.
   const route = store.pendingRoute;
   if (route?.awaitingDir && !binding) {
@@ -318,7 +306,7 @@ function handleMessage(store, msg, now, ctx) {
       }
       return [{
         type: 'send', forceReply: true,
-        text: `⚠ Папка не найдена — пришлите путь ещё раз (новая папка создаётся только прямо в ${esc(ctx.projectsRoot ?? PROJECTS_ROOT)})`,
+        text: t('folderNotFound', esc(ctx.projectsRoot ?? PROJECTS_ROOT)),
       }];
     }
     route.awaitingDir = false;
@@ -337,12 +325,12 @@ function handleMessage(store, msg, now, ctx) {
     return deliver(store, s, text, { replyTo: msg.message_id });
   }
 
-  // (3) always ask: live sessions + «Новая сессия»
+  // (3) always ask: live sessions + «New session»
   const items = pickItems(store);
   store.pendingRoute = { text, createdAt: now, messageId: msg.message_id };
   return [{
     type: 'send',
-    text: items.length ? 'Куда отправить?' : 'Активных сессий нет — запустить новую?',
+    text: items.length ? t('whereSend') : t('noSessionsStart'),
     keyboard: routePickKeyboard(items, String(msg.message_id)),
   }];
 }

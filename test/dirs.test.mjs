@@ -6,11 +6,12 @@ import path from 'node:path';
 import { recentDirs, normDir, looksLikeDir, newProjectDir } from '../src/dirs.mjs';
 
 test('newProjectDir: only a direct child of C:\\Projects with a valid name', () => {
-  assert.equal(newProjectDir('C:\\Projects\\test-tg'), 'C:\\Projects\\test-tg');
-  assert.equal(newProjectDir('c:/projects/new app/'), 'C:\\Projects\\new app');
+  const root = 'C:\\Projects';
+  assert.equal(newProjectDir('C:\\Projects\\test-tg', root), 'C:\\Projects\\test-tg');
+  assert.equal(newProjectDir('c:/projects/new app/', root), 'C:\\Projects\\new app');
   for (const bad of ['C:\\Projects', 'C:\\Projects\\a\\b', 'D:\\Projects\\x', 'C:\\Other\\x', 'C:\\Projects\\..\\x',
     'C:\\Projects\\a?b', 'C:\\Projects\\con', 'C:\\Projects\\name.', 'C:\\Projects\\x:y']) {
-    assert.equal(newProjectDir(bad), null, bad);
+    assert.equal(newProjectDir(bad, root), null, bad);
   }
 });
 

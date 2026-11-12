@@ -1,6 +1,7 @@
 // Hook events -> Effect[]. Mutates the Store, otherwise pure (no I/O).
 import { askText, askKeyboard, planText, permText, optionsKeyboard, resolvedSuffix, header, esc } from './format.mjs';
-import { PLAN_OPTIONS, permissionOptions } from './keys.mjs';
+import { planOptions, permissionOptions } from './keys.mjs';
+import { t } from './i18n.mjs';
 import { projectName } from './procs.mjs';
 
 const MAX_EDIT_TEXT = 3900;
@@ -76,7 +77,7 @@ function mismatchEffects(store, dialog, payload) {
     if (actual === undefined || actual === expected) return;
     out.push({
       type: 'send',
-      text: `${header(store.labelOf(dialog.sessionId))}\n\n⚠ в сессию ушло «${esc(actual)}», а не «${esc(expected)}» — проверьте терминал`,
+      text: `${header(store.labelOf(dialog.sessionId))}\n\n${t('mismatch', esc(actual), esc(expected))}`,
       bind: { sessionId: dialog.sessionId },
     });
   });
@@ -170,8 +171,8 @@ export function handleHookEvent(store, ev, now) {
         const input = payload.tool_input ?? {};
         out.push(...openWithMessage(store, sid, now, {
           kind: 'plan', toolUseId: payload.tool_use_id ?? null, toolName: tool, input,
-          options: [...PLAN_OPTIONS], text: planText(label(), input.plan ?? ''),
-          keyboard: id => optionsKeyboard(id, PLAN_OPTIONS),
+          options: planOptions(), text: planText(label(), input.plan ?? ''),
+          keyboard: id => optionsKeyboard(id, planOptions()),
         }));
       }
       return out;
@@ -199,7 +200,7 @@ export function handleHookEvent(store, ev, now) {
         d.feedbackWarned = true;
         approvedInstead.push({
           type: 'send',
-          text: `${header(label())}\n\n⚠ план был одобрен вместо отправки правок — проверьте терминал`,
+          text: `${header(label())}\n\n${t('planApprovedInstead')}`,
           bind: { sessionId: sid },
         });
       }

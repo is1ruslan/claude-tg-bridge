@@ -64,3 +64,20 @@ test('removeHooks leaves foreign entries sharing a group', () => {
   const s = { hooks: { Stop: [{ hooks: [{ type: 'command', command: 'a' }, { type: 'command', command: String.raw`node "C:\y\cc-telegram\src\hook.mjs" Stop` }] }] } };
   assert.deepEqual(removeHooks(s), { hooks: { Stop: [{ hooks: [{ type: 'command', command: 'a' }] }] } });
 });
+
+test('hooks/hooks.json of the plugin is exactly pluginHooks() (regenerate it when HOOK_EVENTS change)', async () => {
+  const { pluginHooks } = await import('../src/settings.mjs');
+  const fs = await import('node:fs');
+  const file = new URL('../hooks/hooks.json', import.meta.url);
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), pluginHooks());
+  for (const [ev] of HOOK_EVENTS) {
+    assert.equal(pluginHooks().hooks[ev][0].hooks[0].command, `node "\${CLAUDE_PLUGIN_ROOT}/src/hook.mjs" ${ev}`);
+  }
+});
+
+test('removeHooks recognizes hooks pointing at the installed app copy', () => {
+  const app = 'C:/Users/u/.claude/telegram/app';
+  const m = mergeHooks({ effortLevel: 'high' }, app);
+  assert.ok(m.hooks.Stop[0].hooks[0].command.includes('/telegram/app/src/hook.mjs'));
+  assert.deepEqual(removeHooks(m), { effortLevel: 'high' });
+});

@@ -1,0 +1,20 @@
+{
+  "name": "tg-bridge",
+  "description": "Marketplace for the claude-tg-bridge plugin",
+  "owner": {
+    "name": "is1ruslan",
+    "url": "https://github.com/is1ruslan"
+  },
+  "plugins": [
+    {
+      "name": "tg-bridge",
+      "description": "Telegram bridge for Claude Code (Windows): task summaries, questions with inline buttons, permission prompts, instructions and new sessions from a private bot",
+      "version": "0.1.0",
+      "source": "./",
+      "author": {
+        "name": "is1ruslan",
+        "url": "https://github.com/is1ruslan"
+      }
+    }
+  ]
+}

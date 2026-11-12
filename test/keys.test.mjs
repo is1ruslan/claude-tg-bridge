@@ -3,8 +3,11 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
   askSequence, planSequence, permissionSequence, instructionSequence, stopSequence,
-  PLAN_OPTIONS, PLAN_FEEDBACK_INDEX, permissionOptions, describeSuggestion,
+  planOptions, PLAN_FEEDBACK_INDEX, permissionOptions, describeSuggestion,
 } from '../src/keys.mjs';
+import { setLang } from '../src/i18n.mjs';
+
+setLang('ru'); // these tests assert the Russian UI texts
 
 const fx = (n) => JSON.parse(readFileSync(new URL(`./fixtures/hooks/${n}.json`, import.meta.url), 'utf8'));
 const qs = (n) => fx(n).tool_input.questions;
@@ -75,7 +78,7 @@ test('instruction / stop', () => {
   assert.deepEqual(stopSequence(), [{ key: 'ESC' }]);
 });
 test('plan', () => {
-  assert.deepEqual(PLAN_OPTIONS, ['✅ Да, auto mode', '✅ Да, правки вручную', '✏️ Изменить план']);
+  assert.deepEqual(planOptions(), ['✅ Да, auto mode', '✅ Да, правки вручную', '✏️ Изменить план']);
   assert.equal(PLAN_FEEDBACK_INDEX, 2);
   assert.deepEqual(planSequence(0), [{ text: '1' }]);
   assert.deepEqual(planSequence(1), [{ text: '2' }]);

@@ -17,6 +17,7 @@ import { summarize as summarizeDefault, resolveClaude } from './summary.mjs';
 import { completionText, header, esc, dialogKeyboard } from './format.mjs';
 import { restrictToUser as restrictDefault } from './acl.mjs';
 import { createVscodeBridge } from './vscode.mjs';
+import { t, setLang } from './i18n.mjs';
 import { recentDirs as recentDirsDefault, isDir as isDirDefault, PROJECTS_ROOT } from './dirs.mjs';
 
 export const EXIT_PORT_IN_USE = 1;
@@ -30,7 +31,6 @@ const PROCS_CACHE_MS = 2000;
 const BRANCH_EVENTS = new Set(['SessionStart', 'UserPromptSubmit']);
 const ANCESTOR_RETRY_MS = 60_000;
 const MAX_EDIT_TEXT = 3900;
-const RETRY_NOTE = '⚠ не удалось ввести — выберите снова';
 const VSCODE_POLL_MS = 25_000;
 const baseName = (p) => String(p).replace(/[\\/]+$/, '').split(/[\\/]/).pop() || String(p);
 
@@ -69,7 +69,7 @@ export async function startDaemon({
   recentDirs,
   isDir = isDirDefault,
   spawnTimeoutMs = 10_000,
-  projectsRoot = PROJECTS_ROOT, // «Другая папка»: a missing folder directly inside it is created
+  projectsRoot = config?.projectsDir ?? PROJECTS_ROOT, // «Other folder»: a missing folder directly inside it is created
 } = {}) {
   vscode = vscode ?? createVscodeBridge({ now });
   recentDirs = recentDirs ?? (async () => recentDirsDefault({ projectsDir: path.join(path.dirname(paths.root), 'projects') }));
@@ -179,7 +179,7 @@ export async function startDaemon({
     const messageId = d.messageIds[d.messageIds.length - 1];
     const keyboard = dialogKeyboard(d);
     if (messageId == null || !keyboard) return;
-    const text = `${d.text ?? ''}\n\n${RETRY_NOTE}`;
+    const text = `${d.text ?? ''}\n\n${t('retryNote')}`;
     await runEffect({ type: 'edit', messageId, text: text.length > MAX_EDIT_TEXT ? null : text, keyboard });
   }
 
@@ -209,7 +209,7 @@ export async function startDaemon({
       log.warn('inject dropped: process list unavailable', { session: session.short, pid });
       await reopenDialog(e);
       await send({
-        text: `${header(labelOf(e.sessionId))}\n\n⚠ не удалось проверить процесс сессии, ответьте в терминале`,
+        text: `${header(labelOf(e.sessionId))}\n\n${t('procCheckFailed')}`,
         bind: { sessionId: e.sessionId },
       });
       return;
@@ -217,7 +217,7 @@ export async function startDaemon({
     if (state === 'dead') {
       log.warn('inject dropped: session process not alive', { session: String(e.sessionId).slice(0, 8), pid });
       await reopenDialog(e);
-      await send({ text: 'Сессия завершена: ' + esc(labelOf(e.sessionId)), bind: session ? { sessionId: e.sessionId } : undefined });
+      await send({ text: t('sessionEndedLabel', esc(labelOf(e.sessionId))), bind: session ? { sessionId: e.sessionId } : undefined });
       return;
     }
     const r = await inject.injectSteps(pid, e.steps);
@@ -225,7 +225,7 @@ export async function startDaemon({
       log.warn('inject failed', { session: session.short, error: r?.error });
       await reopenDialog(e);
       await send({
-        text: `${header(labelOf(e.sessionId))}\n\n⚠ не удалось ввести в терминал: ${esc(r?.error ?? 'неизвестная ошибка')}`,
+        text: `${header(labelOf(e.sessionId))}\n\n${t('injectFailed', esc(r?.error ?? t('unknownError')))}`,
         bind: { sessionId: e.sessionId },
       });
       return;
@@ -239,8 +239,8 @@ export async function startDaemon({
         // F2: unconfirmed -> close (source telegram) so the session's instructions are not blocked.
         store.closeDialog(dialogId, 'telegram');
         const warn = d.kind === 'perm'
-          ? '⚠ ответ на разрешение не подтверждён за 2 мин — проверьте терминал'
-          : '⚠ не удалось подтвердить ответ — проверьте терминал';
+          ? t('permNotConfirmed')
+          : t('answerNotConfirmed');
         await send({
           text: `${header(labelOf(e.sessionId) || label)}\n\n${warn}`,
           bind: store.getSession(e.sessionId) ? { sessionId: e.sessionId } : undefined,
@@ -260,7 +260,7 @@ export async function startDaemon({
         if (err?.code !== 'EEXIST') {
           log.warn('new session: mkdir failed', { cwd: e.cwd, error: errText(err) });
           inBackground(enqueue('spawn mkdir failed', () => send({
-            text: `⚠ Не удалось создать папку ${esc(e.cwd)}: ${esc(err?.code ?? errText(err))}`, replyTo: e.replyTo,
+            text: t('mkdirFailed', esc(e.cwd), esc(err?.code ?? errText(err))), replyTo: e.replyTo,
           })));
           return;
         }
@@ -284,7 +284,7 @@ export async function startDaemon({
     inBackground(pending.then((r) => enqueue('spawn result', async () => {
       if (r.ok) {
         log.info('new session started in VS Code', { cwd: e.cwd });
-        const text = '🆕 Запущено: ' + esc(name);
+        const text = t('started', esc(name));
         if (e.pickerId != null) await telegram.editMessage({ chatId, messageId: e.pickerId, text, keyboard: null });
         else await send({ text, replyTo: e.replyTo });
         return;
@@ -292,18 +292,18 @@ export async function startDaemon({
       log.warn('new session not started', { cwd: e.cwd, error: r.error });
       if (promptFile) fs.rmSync(promptFile, { force: true });
       if (e.pickerId != null) {
-        await telegram.editMessage({ chatId, messageId: e.pickerId, text: '⚠ Не запущено: ' + esc(name), keyboard: null })
+        await telegram.editMessage({ chatId, messageId: e.pickerId, text: t('notStarted', esc(name)), keyboard: null })
           .catch((err) => log.warn('picker edit failed', { error: errText(err) }));
       }
       const noAnswer = r.error === 'timeout' || r.error === 'no-window';
       const text = noAnswer
-        ? '⚠ VS Code не отвечает — сессия не создана'
-        : `⚠ Не удалось запустить сессию: ${esc(r.error ?? 'ошибка')}`;
+        ? t('vscodeDown')
+        : t('spawnFailed', esc(r.error ?? t('error')));
       // The text is not lost: restore the route so «Повторить» (f|key|0) spawns again —
       // unless the user has sent a newer message meanwhile (its picker must keep working).
       if (store.pendingRoute == null) {
         store.pendingRoute = { text: e.text, createdAt: now(), messageId: e.replyTo, folders: [e.cwd], pickerId: e.pickerId ?? undefined };
-        await send({ text, keyboard: [[{ text: '🔁 Повторить', callback_data: `f|${e.msgKey}|0` }]] });
+        await send({ text, keyboard: [[{ text: t('retry'), callback_data: `f|${e.msgKey}|0` }]] });
       } else {
         await send({ text, replyTo: e.replyTo });
       }
@@ -326,7 +326,7 @@ export async function startDaemon({
           .then(() => summarize(e.lastMessage, { failed: e.failed }))
           .catch((err) => { log.error('summarize failed', { error: errText(err) }); return { status: e.failed ? 'error' : 'done' }; })
           .then((r) => enqueue('completion', () => send({
-            text: completionText(labelOf(e.sessionId), r?.status, r?.summary || '(пустой ответ)'),
+            text: completionText(labelOf(e.sessionId), r?.status, r?.summary || t('emptyReply')),
             bind: { sessionId: e.sessionId },
           }))));
         return;
@@ -590,6 +590,7 @@ export async function startDaemon({
 async function main(log, secrets) {
   const p = getPaths();
   const config = loadConfig();
+  setLang(config.lang);
   const secret = randomBytes(16).toString('hex');
   secrets.push(config.token, secret);
   const d = await startDaemon({ config, paths: p, log, secret });

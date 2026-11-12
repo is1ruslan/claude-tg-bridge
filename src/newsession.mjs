@@ -10,7 +10,7 @@ export const promptArg = (text) => (/^\s*-/.test(text) ? ' ' + text : text);
 // -> { cmd, args } or { error }. Never through a shell: the prompt is untrusted text from Telegram
 // and cmd.exe would interpret & | > % and cut it at the first newline.
 export function claudeLaunch(prompt, claude = resolveClaude()) {
-  if (claude.shell) return { error: `найден только ${claude.cmd} (без claude.exe) — запуск через cmd небезопасен` };
+  if (claude.shell) return { error: `only ${claude.cmd} found (no claude.exe) — launching through cmd is unsafe` };
   return { cmd: claude.cmd, args: prompt.trim() ? [promptArg(prompt)] : [] };
 }
 
@@ -20,7 +20,7 @@ function main(promptFile) {
     prompt = fs.readFileSync(promptFile, 'utf8');
     fs.rmSync(promptFile, { force: true });
   } catch (e) {
-    process.stderr.write(`cc-telegram: не удалось прочитать промпт (${e.message})\n`);
+    process.stderr.write(`cc-telegram: could not read the prompt (${e.message})\n`);
   }
   // Ctrl+C belongs to claude; this wrapper must survive it or VS Code would close the tab.
   process.on('SIGINT', () => {});
@@ -28,10 +28,10 @@ function main(promptFile) {
   delete env.CC_TELEGRAM_DISABLE;
   const launch = claudeLaunch(prompt);
   if (launch.error) {
-    process.stderr.write(`cc-telegram: ${launch.error}\nПромпт:\n${prompt}\n`);
+    process.stderr.write(`cc-telegram: ${launch.error}\nPrompt:\n${prompt}\n`);
   } else {
     const r = spawnSync(launch.cmd, launch.args, { stdio: 'inherit', env });
-    if (r.error) process.stderr.write(`cc-telegram: claude не запустился (${r.error.message})\n`);
+    if (r.error) process.stderr.write(`cc-telegram: claude did not start (${r.error.message})\n`);
   }
   spawnSync('powershell.exe', ['-NoLogo'], { stdio: 'inherit', env });
 }

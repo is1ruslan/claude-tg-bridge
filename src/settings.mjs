@@ -10,7 +10,8 @@ export const HOOK_EVENTS = [
   ['SessionEnd', null],
 ];
 
-const MARKER = 'cc-telegram/src/hook.mjs';
+// Our hook from a git clone (cc-telegram / claude-tg-bridge) or from the app copy (~/.claude/telegram/app).
+const MARKER = /(cc-telegram|claude-tg-bridge|telegram\/app)\/src\/hook\.mjs/i;
 const toSlash = (s) => String(s).split(String.fromCharCode(92)).join('/');
 
 export function hookCommand(repo, event) {
@@ -18,7 +19,18 @@ export function hookCommand(repo, event) {
 }
 
 export function isOurs(entry) {
-  return typeof entry?.command === 'string' && toSlash(entry.command).includes(MARKER);
+  return typeof entry?.command === 'string' && MARKER.test(toSlash(entry.command));
+}
+
+// Contents of the plugin's hooks/hooks.json (same events and options as the settings.json hooks).
+export function pluginHooks() {
+  const hooks = {};
+  for (const [event, matcher] of HOOK_EVENTS) {
+    const group = { hooks: [{ type: 'command', command: hookCommand('${CLAUDE_PLUGIN_ROOT}', event), async: true, timeout: 5 }] };
+    if (matcher) group.matcher = matcher;
+    hooks[event] = [group];
+  }
+  return { description: 'claude-tg-bridge: forwards Claude Code events to the local Telegram bridge daemon', hooks };
 }
 
 // Remove only our entries; drop groups/events/hooks-key that become empty because of it.
